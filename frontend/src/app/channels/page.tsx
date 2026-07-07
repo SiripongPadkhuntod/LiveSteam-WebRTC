@@ -105,9 +105,10 @@ export default function ChannelsPage() {
                 value={newRoomName}
                 onChange={(event) => setNewRoomName(event.target.value)}
                 maxLength={120}
+                required
               />
             </div>
-            <Button type="submit" variant="primary" disabled={isCreating || !newRoomName.trim()} isLoading={isCreating}>
+            <Button type="submit" variant="primary" disabled={isCreating} isLoading={isCreating}>
               <Plus size={18} /> สร้างห้องใหม่
             </Button>
           </form>

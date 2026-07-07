@@ -41,6 +41,31 @@ func TestTokenHandlerRejectsPublisherRoleFromViewer(t *testing.T) {
 	}
 }
 
+func TestTokenHandlerCreatesD1Token(t *testing.T) {
+	cfg := config{
+		APIKey:      "devkey",
+		APISecret:   "devsecret_devsecret_devsecret_12345",
+		D1APIKey:    "d1key",
+		D1APISecret: "d1secret_d1secret_d1secret_12345",
+	}
+	body, _ := json.Marshal(tokenRequest{Identity: "program-1", Room: "demo-program", Role: "broadcaster", Target: "d1"})
+	req := httptest.NewRequest(http.MethodPost, "http://192.168.1.10:8080/api/token", bytes.NewReader(body))
+	res := httptest.NewRecorder()
+
+	tokenHandler(cfg).ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", res.Code, res.Body.String())
+	}
+	var payload tokenResponse
+	if err := json.NewDecoder(res.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Token == "" || payload.URL != "ws://192.168.1.10:7980" {
+		t.Fatalf("unexpected D1 token response: %+v", payload)
+	}
+}
+
 func TestOriginAllowedForPrivateLAN(t *testing.T) {
 	if !originAllowed("http://192.168.1.25:3001", nil, true) {
 		t.Fatal("expected private LAN origin to be allowed in local mode")

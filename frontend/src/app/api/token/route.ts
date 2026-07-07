@@ -4,23 +4,30 @@ const controlAPIURL = (process.env.CONTROL_API_URL ?? "http://127.0.0.1:8080").r
 
 export async function POST(request: NextRequest) {
   try {
+    const requestBody = await request.text();
+    const target = tokenTarget(requestBody);
     const upstream = await fetch(`${controlAPIURL}/api/token`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: await request.text(),
+      body: requestBody,
       cache: "no-store",
     });
 
     const payload = (await upstream.json()) as Record<string, unknown>;
-    const publicLiveKitURL = process.env.LIVEKIT_PUBLIC_URL?.trim();
+    const publicLiveKitURL = target === "d1"
+      ? process.env.D1_LIVEKIT_PUBLIC_URL?.trim()
+      : process.env.LIVEKIT_PUBLIC_URL?.trim();
+    const signalingPort = target === "d1" ? 7980 : 7880;
 
     if (upstream.ok) {
       const hostname = requestHostname(request);
-      if (isLocalNetworkHost(hostname)) {
-        const host = hostname.includes(":") ? `[${hostname}]` : hostname;
-        payload.url = `${request.nextUrl.protocol === "https:" ? "wss" : "ws"}://${host}:7880`;
-      } else if (publicLiveKitURL) {
+      // An explicit public URL points at the HTTPS/WSS gateway and must win
+      // over the legacy direct-port fallback used by local development.
+      if (publicLiveKitURL) {
         payload.url = publicLiveKitURL;
+      } else if (isLocalNetworkHost(hostname)) {
+        const host = hostname.includes(":") ? `[${hostname}]` : hostname;
+        payload.url = `${request.nextUrl.protocol === "https:" ? "wss" : "ws"}://${host}:${signalingPort}`;
       }
     }
 
@@ -31,6 +38,15 @@ export async function POST(request: NextRequest) {
       { error: "ติดต่อ Control API ไม่ได้ กรุณาตรวจสอบว่า Go backend ทำงานอยู่ที่พอร์ต 8080" },
       { status: 502 },
     );
+  }
+}
+
+function tokenTarget(body: string) {
+  try {
+    const parsed = JSON.parse(body) as { target?: unknown };
+    return parsed.target === "d1" ? "d1" : "source";
+  } catch {
+    return "source";
   }
 }
 

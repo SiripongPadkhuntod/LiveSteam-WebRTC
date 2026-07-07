@@ -19,18 +19,24 @@ import (
 )
 
 type config struct {
-	Addr           string
-	APIKey         string
-	APISecret      string
-	LiveKitURL     string
-	AllowedOrigins []string
-	AllowPrivate   bool
+	Addr               string
+	APIKey             string
+	APISecret          string
+	LiveKitURL         string
+	LiveKitInternalURL string
+	D1APIKey           string
+	D1APISecret        string
+	D1LiveKitURL       string
+	D1InternalURL      string
+	AllowedOrigins     []string
+	AllowPrivate       bool
 }
 
 type tokenRequest struct {
 	Identity string `json:"identity"`
 	Room     string `json:"room"`
 	Role     string `json:"role"`
+	Target   string `json:"target,omitempty"`
 }
 
 type tokenResponse struct {
@@ -59,12 +65,14 @@ func main() {
 	cfg := loadConfig()
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 	rooms := newRoomStore()
+	bridges := newBridgeManager(cfg, logger)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 	mux.HandleFunc("POST /api/token", tokenHandler(cfg))
+	mux.HandleFunc("POST /api/bridge", bridges.handleEnsure)
 	mux.HandleFunc("GET /api/rooms", rooms.handleGet)
 	mux.HandleFunc("POST /api/rooms", rooms.handleCreate)
 
@@ -180,12 +188,17 @@ func normalizeRoomCode(value string) string {
 
 func loadConfig() config {
 	return config{
-		Addr:           env("HTTP_ADDR", ":8080"),
-		APIKey:         env("LIVEKIT_API_KEY", "devkey"),
-		APISecret:      env("LIVEKIT_API_SECRET", "devsecret_devsecret_devsecret_12345"),
-		LiveKitURL:     os.Getenv("LIVEKIT_URL"),
-		AllowedOrigins: splitCSV(env("ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:3001")),
-		AllowPrivate:   envBool("ALLOW_PRIVATE_ORIGINS", true),
+		Addr:               env("HTTP_ADDR", ":8080"),
+		APIKey:             env("LIVEKIT_API_KEY", "devkey"),
+		APISecret:          env("LIVEKIT_API_SECRET", "devsecret_devsecret_devsecret_12345"),
+		LiveKitURL:         os.Getenv("LIVEKIT_URL"),
+		LiveKitInternalURL: os.Getenv("LIVEKIT_INTERNAL_URL"),
+		D1APIKey:           env("D1_LIVEKIT_API_KEY", "d1key"),
+		D1APISecret:        env("D1_LIVEKIT_API_SECRET", "d1secret_d1secret_d1secret_12345"),
+		D1LiveKitURL:       os.Getenv("D1_LIVEKIT_URL"),
+		D1InternalURL:      os.Getenv("D1_LIVEKIT_INTERNAL_URL"),
+		AllowedOrigins:     splitCSV(env("ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:3001")),
+		AllowPrivate:       envBool("ALLOW_PRIVATE_ORIGINS", true),
 	}
 }
 
@@ -223,7 +236,23 @@ func tokenHandler(cfg config) http.HandlerFunc {
 			return
 		}
 
-		token := auth.NewAccessToken(cfg.APIKey, cfg.APISecret).
+		apiKey := cfg.APIKey
+		apiSecret := cfg.APISecret
+		configuredURL := cfg.LiveKitURL
+		publicPort := "7880"
+		switch req.Target {
+		case "", "source":
+		case "d1":
+			apiKey = cfg.D1APIKey
+			apiSecret = cfg.D1APISecret
+			configuredURL = cfg.D1LiveKitURL
+			publicPort = "7980"
+		default:
+			writeError(w, http.StatusBadRequest, "target must be source or d1")
+			return
+		}
+
+		token := auth.NewAccessToken(apiKey, apiSecret).
 			SetIdentity(req.Identity).
 			SetValidFor(2 * time.Hour).
 			AddGrant(grant)
@@ -235,7 +264,7 @@ func tokenHandler(cfg config) http.HandlerFunc {
 
 		writeJSON(w, http.StatusOK, tokenResponse{
 			Token: jwt,
-			URL:   liveKitURL(cfg.LiveKitURL, r),
+			URL:   liveKitURLAtPort(configuredURL, r, publicPort),
 		})
 	}
 }
@@ -285,6 +314,10 @@ func originAllowed(origin string, allowedOrigins []string, allowPrivate bool) bo
 }
 
 func liveKitURL(configured string, r *http.Request) string {
+	return liveKitURLAtPort(configured, r, "7880")
+}
+
+func liveKitURLAtPort(configured string, r *http.Request, port string) string {
 	if configured != "" {
 		return configured
 	}
@@ -297,7 +330,7 @@ func liveKitURL(configured string, r *http.Request) string {
 	if r.TLS != nil {
 		scheme = "wss"
 	}
-	return scheme + "://" + net.JoinHostPort(host, "7880")
+	return scheme + "://" + net.JoinHostPort(host, port)
 }
 
 func withLogging(logger *slog.Logger, next http.Handler) http.Handler {

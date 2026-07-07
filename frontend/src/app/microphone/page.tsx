@@ -110,41 +110,112 @@ export default function MicrophonePage() {
   const isWorking = status === "connecting" || status === "connected";
 
   return (
-    <main className="shell studio-page">
+    <main className="shell studio-page" style={{ paddingBottom: 120 }}>
       <header className="topbar">
-        <Link className="brand" href="/"><span className="brand-dot" /> LocalStream</Link>
-        <div className="status-cluster">
-          <span className={`status-pill ${status === "connected" ? "live" : ""}`}><i />{status === "connected" ? (muted ? "MUTED" : "CONNECTED") : status === "connecting" ? "CONNECTING" : "OFFLINE"}</span>
-          <span className="connection">SFU · {connectionState}</span>
+        <Link className="brand" href="/">
+          <div className="brand-dot" />
+          LocalStream
+        </Link>
+        <div className="status-cluster" style={{ display: "flex", gap: "12px", alignItems: "center" }}>
+          <Badge variant={status === "connected" ? (muted ? "default" : "live") : "default"} showDot>
+            {status === "connected" ? (muted ? "MUTED" : "CONNECTED") : status === "connecting" ? "CONNECTING" : "OFFLINE"}
+          </Badge>
+          <span className="connection text-sm">SFU · {connectionState}</span>
         </div>
       </header>
 
-      <section className="studio-heading">
-        <div><p className="eyebrow">AUDIO SOURCE</p><h1>{microphoneName}</h1></div>
-        <div className="room-label"><span>ROOM</span>{connectedRoom ? `${connectedRoom.name} · ${connectedRoom.code}` : "NOT CONNECTED"}</div>
+      <section className="studio-heading" style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", padding: "32px 0" }}>
+        <div>
+          <p className="eyebrow" style={{ color: "var(--brand-accent)", marginBottom: "8px" }}>AUDIO SOURCE</p>
+          <h1 className="h1">{microphoneName}</h1>
+        </div>
+        <div className="room-label text-sm" style={{ textAlign: "right" }}>
+          <span style={{ display: "block", color: "var(--text-tertiary)", fontSize: "11px", letterSpacing: "0.1em", marginBottom: "4px" }}>
+            ROOM
+          </span>
+          {connectedRoom ? `${connectedRoom.name} · ${connectedRoom.code}` : "NOT CONNECTED"}
+        </div>
       </section>
 
-      {!isWorking && (
-        <section className="camera-code-panel">
-          <label htmlFor="microphone-room-code">ROOM CODE</label>
-          <input id="microphone-room-code" value={roomCode} onChange={(event) => setRoomCode(event.target.value.replace(/[^a-zA-Z0-9-]/g, "").toUpperCase())} placeholder="เช่น A7K9P2" maxLength={8} autoCapitalize="characters" autoComplete="off" />
-          <p>ไมโครโฟนจะส่งเฉพาะเสียงเข้าห้อง โดย Studio เป็นผู้เลือกว่าจะนำเสียงนี้ออก Program หรือไม่</p>
-        </section>
-      )}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: "24px" }}>
+        {!isWorking && (
+          <Card style={{ maxWidth: "500px", margin: "0 auto", width: "100%" }}>
+            <CardBody style={{ display: "flex", flexDirection: "column", gap: "16px", padding: "32px" }}>
+              <div style={{ textAlign: "center", marginBottom: "8px" }}>
+                <Mic size={32} style={{ margin: "0 auto 12px", color: "var(--brand-accent)" }} />
+                <h2 className="h3">เชื่อมต่อไมโครโฟน</h2>
+                <p className="text-sm" style={{ marginTop: "8px" }}>รับ Room Code จากผู้สร้างห้อง (Studio) แล้วกรอกด้านล่างเพื่อส่งสัญญาณเสียง</p>
+              </div>
+              <Input
+                label="ROOM CODE"
+                id="microphone-room-code"
+                value={roomCode}
+                onChange={(event) => setRoomCode(event.target.value.replace(/[^a-zA-Z0-9-]/g, "").toUpperCase())}
+                placeholder="เช่น A7K9P2"
+                maxLength={8}
+                style={{ textAlign: "center", fontSize: "24px", letterSpacing: "0.2em", height: "60px", fontWeight: 700 }}
+              />
+              <Button
+                variant="primary"
+                size="lg"
+                onClick={startMicrophone}
+                disabled={!roomCode.trim()}
+                style={{ width: "100%", marginTop: "8px" }}
+              >
+                เชื่อมต่อไมโครโฟน
+              </Button>
+            </CardBody>
+          </Card>
+        )}
 
-      <section className={`microphone-stage ${status === "connected" && !muted ? "active" : ""}`}>
-        <div className="microphone-icon" aria-hidden="true">●</div>
-        <span>{status === "connected" ? (muted ? "MICROPHONE MUTED" : "MICROPHONE CONNECTED") : "MICROPHONE OFFLINE"}</span>
-        <p>{connectedRoom ? `Room Code · ${connectedRoom.code}` : "กรอก Code แล้วอนุญาตการใช้ไมโครโฟน"}</p>
-      </section>
+        <Card>
+          <CardHeader style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "16px 24px" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+              {muted ? <MicOff size={18} style={{ color: "var(--danger)" }} /> : <Mic size={18} style={{ color: "var(--text-secondary)" }} />}
+              <span style={{ fontWeight: 600 }}>Microphone Status</span>
+            </div>
+            <span className="text-sm">ไมโครโฟนของคุณ</span>
+          </CardHeader>
+          <CardBody style={{ padding: 0 }}>
+            <div className={`microphone-stage ${status === "connected" && !muted ? "active" : ""}`} style={{ width: "100%", aspectRatio: "16/9", position: "relative", backgroundColor: "#000", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", transition: "all 0.3s ease" }}>
 
-      <footer className="control-dock">
-        <div className={`system-message ${status === "error" ? "error" : ""}`}><i />{message}</div>
-        <div className="dock-actions">
-          {!isWorking && <button className="button primary live-action" onClick={startMicrophone}>เชื่อมต่อไมโครโฟน</button>}
-          {status === "connected" && <button className="button secondary" onClick={toggleMute}>{muted ? "เปิดไมค์" : "ปิดเสียงไมค์"}</button>}
-          {isWorking && <button className="button danger" onClick={stopMicrophone}>หยุดการทำงาน</button>}
-          <Link className="button ghost" href="/channels">กลับ</Link>
+              <div style={{ width: "120px", height: "120px", borderRadius: "50%", background: status === "connected" && !muted ? "rgba(255, 62, 0, 0.15)" : "rgba(255, 255, 255, 0.05)", display: "flex", alignItems: "center", justifyContent: "center", marginBottom: "24px", transition: "all 0.3s ease", boxShadow: status === "connected" && !muted ? "0 0 0 20px rgba(255, 62, 0, 0.05), 0 0 0 40px rgba(255, 62, 0, 0.02)" : "none" }}>
+                {muted ? <MicOff size={48} style={{ color: "var(--danger)" }} /> : <Mic size={48} style={{ color: status === "connected" ? "var(--brand-accent)" : "var(--text-tertiary)" }} />}
+              </div>
+
+              <span style={{ fontSize: "14px", letterSpacing: "0.15em", fontWeight: 600, color: status === "connected" && !muted ? "var(--brand-accent)" : "var(--text-secondary)" }}>
+                {status === "connected" ? (muted ? "MICROPHONE MUTED" : "MICROPHONE CONNECTED") : "MICROPHONE OFFLINE"}
+              </span>
+              <p className="text-sm" style={{ marginTop: "12px", color: "var(--text-tertiary)" }}>
+                {connectedRoom ? `Room Code · ${connectedRoom.code}` : "กรอก Code แล้วอนุญาตการใช้ไมโครโฟน"}
+              </p>
+            </div>
+          </CardBody>
+        </Card>
+      </div>
+
+      <footer className="control-dock" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", position: "fixed", bottom: 0, left: 0, right: 0, padding: "16px 24px", background: "rgba(10,10,10,0.85)", backdropFilter: "blur(12px)", borderTop: "1px solid var(--border-strong)", zIndex: 100 }}>
+        <div style={{ color: status === "error" ? "var(--danger)" : "var(--text-secondary)", fontSize: "14px", display: "flex", alignItems: "center", gap: "8px" }}>
+          {status === "error" ? <UserX size={16} /> : <Info size={16} />}
+          {message}
+        </div>
+        <div className="dock-actions" style={{ display: "flex", gap: "12px" }}>
+          {!isWorking && (
+             <Link href="/channels">
+               <Button variant="ghost">กลับ</Button>
+             </Link>
+          )}
+          {status === "connected" && (
+            <Button variant={muted ? "primary" : "secondary"} onClick={toggleMute}>
+              {muted ? <Mic size={16} /> : <MicOff size={16} />}
+              {muted ? "เปิดไมค์" : "ปิดเสียงไมค์"}
+            </Button>
+          )}
+          {isWorking && (
+            <Button variant="danger" onClick={stopMicrophone}>
+              <Square size={16} /> หยุดการทำงาน
+            </Button>
+          )}
         </div>
       </footer>
     </main>

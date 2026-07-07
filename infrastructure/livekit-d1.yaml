@@ -1,0 +1,15 @@
+port: 7980
+
+rtc:
+  tcp_port: 7981
+  udp_port: 7982
+  use_external_ip: false
+
+redis:
+  address: redis-d1:6379
+
+keys:
+  d1key: d1secret_d1secret_d1secret_12345
+
+logging:
+  level: info

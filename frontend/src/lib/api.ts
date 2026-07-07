@@ -1,4 +1,5 @@
 export type ParticipantRole = "broadcaster" | "monitor" | "viewer";
+export type MediaTarget = "source" | "d1";
 
 export type BroadcastRoom = {
   id: string;
@@ -8,11 +9,16 @@ export type BroadcastRoom = {
   createdAt: string;
 };
 
-export async function getConnectionToken(identity: string, room: string, role: ParticipantRole) {
+export async function getConnectionToken(
+  identity: string,
+  room: string,
+  role: ParticipantRole,
+  target: MediaTarget = "source",
+) {
   const response = await fetch(tokenEndpoint(), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ identity, room, role }),
+    body: JSON.stringify({ identity, room, role, target }),
   });
 
   const payload = await response.json();
@@ -43,6 +49,17 @@ export async function findRoomByCode(code: string) {
   const normalized = code.trim().replaceAll("-", "").toUpperCase();
   const response = await fetch(`/api/rooms?code=${encodeURIComponent(normalized)}`, { cache: "no-store" });
   return readRoomResponse(response);
+}
+
+export async function ensureProgramBridge(room: string) {
+  const response = await fetch("/api/bridge", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ room }),
+  });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error ?? "เริ่ม Program RTP Bridge ไม่สำเร็จ");
+  return payload as { room: string; d1Room: string; identity: string; passthrough: boolean };
 }
 
 async function readRoomResponse(response: Response) {

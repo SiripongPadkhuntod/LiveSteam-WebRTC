@@ -5,15 +5,15 @@ import { useEffect, useRef, useState } from "react";
 import {
   ConnectionState,
   LocalAudioTrack,
-  LocalVideoTrack,
   Room,
   RoomEvent,
   Track,
+  VideoQuality,
   type RemoteTrack,
   type RemoteTrackPublication,
   type RemoteParticipant,
 } from "livekit-client";
-import { getConnectionToken } from "@/lib/api";
+import { ensureProgramBridge, getConnectionToken } from "@/lib/api";
 import { channelByID, channelIDFromSearch, DEFAULT_CHANNEL_ID, programRoomID } from "@/lib/channels";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -26,6 +26,7 @@ type CameraSource = {
   label: string;
   participant: RemoteParticipant;
   videoTrack?: Track;
+  videoPublication?: RemoteTrackPublication;
   audioTrack?: Track;
 };
 
@@ -45,10 +46,7 @@ export default function StudioPage() {
   const outputVideo = useRef<HTMLVideoElement>(null);
   const publisherRoom = useRef<Room | null>(null);
   const outputPublisherRoom = useRef<Room | null>(null);
-  const monitorRoom = useRef<Room | null>(null);
-  const programVideoTrack = useRef<LocalVideoTrack | null>(null);
   const programAudioTrack = useRef<LocalAudioTrack | null>(null);
-  const programSwitchQueue = useRef<Promise<void>>(Promise.resolve());
   const previewAudioElement = useRef<HTMLAudioElement | null>(null);
   const programAudioEnabledRef = useRef(true);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -104,10 +102,8 @@ export default function StudioPage() {
   }, [audioSources, monitoredAudioSourceId]);
 
   useEffect(() => () => {
-    monitorRoom.current?.disconnect();
     outputPublisherRoom.current?.disconnect();
     publisherRoom.current?.disconnect();
-    programVideoTrack.current?.stop();
     programAudioTrack.current?.stop();
     previewAudioElement.current?.remove();
     audioMixerNodesRef.current.forEach(({ source, gain }) => {
@@ -128,6 +124,7 @@ export default function StudioPage() {
                    label: p.name || p.identity,
                    participant: p,
                    videoTrack: videoPub?.videoTrack,
+                   videoPublication: videoPub,
                    audioTrack: audioPub?.audioTrack,
                }
            });
@@ -157,7 +154,7 @@ export default function StudioPage() {
       
       // Connect to the Channel room
       const broadcaster = await getConnectionToken(studioIdentity, roomName, "broadcaster");
-      const pubRoom = new Room({ adaptiveStream: true, dynacast: true });
+      const pubRoom = new Room({ adaptiveStream: false, dynacast: false });
       pubRoom.on(RoomEvent.ConnectionStateChanged, (state: ConnectionState) => setConnectionState(state));
       
       const updateCameras = () => {
@@ -172,14 +169,19 @@ export default function StudioPage() {
              next[source.id] = current[source.id] ?? { enabled: false, volume: 100 };
            });
            audioMixSettingsRef.current = next;
-           if (programVideoTrack.current) void syncAudioMixer(audio, next, true);
+           if (programAudioTrack.current) void syncAudioMixer(audio, next, true);
            return next;
          });
          
          if (cams.length > 0) {
             if (!activeCameraIdRef.current || !cams.find(c => c.id === activeCameraIdRef.current)) {
                 const firstReadyCamera = cams.find(c => c.videoTrack);
-                if (firstReadyCamera) setActiveCameraId(firstReadyCamera.id);
+                if (firstReadyCamera) {
+                  setActiveCameraId(firstReadyCamera.id);
+                  setInputVideoQuality(cams, firstReadyCamera.id);
+                }
+            } else {
+              setInputVideoQuality(cams, activeCameraIdRef.current);
             }
          } else {
             setActiveCameraId(null);
@@ -199,11 +201,16 @@ export default function StudioPage() {
       updateCameras();
       publisherRoom.current = pubRoom;
 
-      // One dedicated Publisher Session carries both program-video and
-      // program-audio into an isolated Program Room for viewers.
+      await ensureProgramBridge(roomName);
+
+      // The Go RTP bridge is the only Publisher Session on D1. Studio joins
+      // as a monitor/controller and never re-encodes Program video.
       const outputRoomName = programRoomID(roomName);
-      const outputCredentials = await getConnectionToken(`program-${roomName}`, outputRoomName, "broadcaster");
-      const outRoom = new Room({ adaptiveStream: true, dynacast: true });
+      const outputCredentials = await getConnectionToken(`studio-${roomName}-d1-monitor`, outputRoomName, "monitor", "d1");
+      const outRoom = new Room({
+        adaptiveStream: false,
+        dynacast: false,
+      });
       const refreshViewerCount = () => {
         const viewers = Array.from(outRoom.remoteParticipants.values())
           .filter((participant) => participant.identity.startsWith("viewer-")).length;
@@ -211,27 +218,20 @@ export default function StudioPage() {
       };
       outRoom.on(RoomEvent.ParticipantConnected, refreshViewerCount);
       outRoom.on(RoomEvent.ParticipantDisconnected, refreshViewerCount);
-      await outRoom.connect(outputCredentials.url, outputCredentials.token, { autoSubscribe: false });
-      refreshViewerCount();
-      outputPublisherRoom.current = outRoom;
-
-      // A separate monitor connection receives exactly the same Program track
-      // as viewers from the isolated Program Room.
-      const monitorCredentials = await getConnectionToken(studioIdentity + "-monitor", outputRoomName, "monitor");
-      const monRoom = new Room({ adaptiveStream: true });
       const subscribeToProgram = (publication: RemoteTrackPublication) => {
         if (publication.trackName === "program-video" || publication.trackName === "program-audio") {
           publication.setSubscribed(true);
         }
       };
-      monRoom.on(RoomEvent.TrackPublished, subscribeToProgram);
-      monRoom.on(RoomEvent.TrackSubscribed, attachProgramMonitorTrack);
-      monRoom.on(RoomEvent.TrackUnsubscribed, (track) => track.detach());
-      await monRoom.connect(monitorCredentials.url, monitorCredentials.token, { autoSubscribe: false });
-      monRoom.remoteParticipants.forEach((participant) => {
+      outRoom.on(RoomEvent.TrackPublished, subscribeToProgram);
+      outRoom.on(RoomEvent.TrackSubscribed, attachProgramMonitorTrack);
+      outRoom.on(RoomEvent.TrackUnsubscribed, (track) => track.detach());
+      await outRoom.connect(outputCredentials.url, outputCredentials.token, { autoSubscribe: false });
+      outRoom.remoteParticipants.forEach((participant) => {
         participant.trackPublications.forEach(subscribeToProgram);
       });
-      monitorRoom.current = monRoom;
+      refreshViewerCount();
+      outputPublisherRoom.current = outRoom;
 
       setStatus("ready");
       setMessage("Studio พร้อมแล้ว · ตรวจภาพและเสียงก่อนเริ่มถ่ายทอดสด");
@@ -242,16 +242,14 @@ export default function StudioPage() {
     }
   }
 
-  function switchCamera(id: string, room: Room | null = outputPublisherRoom.current, sources: CameraSource[] = cameras) {
-    const operation = programSwitchQueue.current.then(async () => {
-      try {
-        await applyProgramSwitch(id, room, sources);
-      } catch (error) {
-        setMessage(error instanceof Error ? error.message : "เปลี่ยน Program ไม่สำเร็จ");
-      }
-    });
-    programSwitchQueue.current = operation;
-    return operation;
+  async function switchCamera(id: string, sources: CameraSource[] = cameras) {
+    const camera = sources.find((source) => source.id === id);
+    if (!camera?.videoTrack) throw new Error(`กล้อง ${id} ยังไม่มี Video Track`);
+    camera.videoPublication?.setVideoQuality(VideoQuality.HIGH);
+    await sendBridgeControl("program-switch", id);
+    setActiveCameraId(id);
+    setInputVideoQuality(sources, id);
+    setMessage(`เปลี่ยน Program เป็น ${id} แล้ว · RTP passthrough`);
   }
 
   function selectCamera(id: string) {
@@ -260,31 +258,26 @@ export default function StudioPage() {
       return;
     }
     setActiveCameraId(id);
+    setInputVideoQuality(cameras, id);
     setMessage(`เลือก ${id} เป็นกล้องเริ่มต้นแล้ว · ยังไม่ได้ถ่ายทอดสด`);
   }
 
-  async function applyProgramSwitch(id: string, room: Room | null, sources: CameraSource[]) {
-    if (!room) return;
-    const camera = sources.find(source => source.id === id);
-    if (!camera?.videoTrack) throw new Error(`กล้อง ${id} ยังไม่มี Video Track`);
+  function setInputVideoQuality(sources: CameraSource[], programCameraID: string) {
+    sources.forEach((source) => {
+      source.videoPublication?.setVideoQuality(
+        source.id === programCameraID ? VideoQuality.HIGH : VideoQuality.LOW,
+      );
+    });
+  }
 
-    const nextVideo = camera.videoTrack.mediaStreamTrack.clone();
-    if (!programVideoTrack.current) {
-      const localVideo = new LocalVideoTrack(nextVideo, undefined, true);
-      await room.localParticipant.publishTrack(localVideo, {
-        name: "program-video",
-        source: Track.Source.Camera,
-        simulcast: true,
-      });
-      programVideoTrack.current = localVideo;
-    } else {
-      const previousVideo = programVideoTrack.current.mediaStreamTrack;
-      await programVideoTrack.current.replaceTrack(nextVideo, true);
-      previousVideo.stop();
-    }
 
-    setActiveCameraId(id);
-    setMessage(`เปลี่ยน Program เป็น ${id} แล้ว`);
+  async function sendBridgeControl(type: "program-start" | "program-switch" | "program-stop", sourceId?: string) {
+    if (!publisherRoom.current) throw new Error("Source SFU ยังไม่เชื่อมต่อ");
+    const data = new TextEncoder().encode(JSON.stringify({ type, sourceId }));
+    await publisherRoom.current.localParticipant.publishData(data, {
+      reliable: true,
+      destinationIdentities: [`bridge-${roomName}`],
+    });
   }
 
   async function disconnectSource(sourceId: string) {
@@ -305,7 +298,7 @@ export default function StudioPage() {
   }
 
   async function startBroadcast() {
-    if (!activeCameraId || !outputPublisherRoom.current) {
+    if (!activeCameraId || !outputPublisherRoom.current || !publisherRoom.current) {
       setMessage("กรุณารอหรือเลือกกล้องก่อนเริ่มถ่ายทอดสด");
       return;
     }
@@ -315,10 +308,10 @@ export default function StudioPage() {
       if (programAudioEnabledRef.current && audioSourcesRef.current.some((source) => audioMixSettingsRef.current[source.id]?.enabled)) {
         prepareAudioMixerContext();
       }
-      await applyProgramSwitch(activeCameraId, outputPublisherRoom.current, cameras);
       await syncAudioMixer(audioSourcesRef.current, audioMixSettingsRef.current, true);
+      await sendBridgeControl("program-start", activeCameraId);
       setStatus("live");
-      setMessage(`กำลังถ่ายทอดสดจาก ${activeCameraId}`);
+      setMessage(`กำลังถ่ายทอดสดจาก ${activeCameraId} · H.264 RTP passthrough`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "เริ่มถ่ายทอดสดไม่สำเร็จ");
     } finally {
@@ -327,15 +320,11 @@ export default function StudioPage() {
   }
 
   async function stopBroadcast() {
-    const room = outputPublisherRoom.current;
+    const room = publisherRoom.current;
     if (!room) return;
     setBroadcastBusy(true);
     try {
-      if (programVideoTrack.current) {
-        await room.localParticipant.unpublishTrack(programVideoTrack.current);
-        programVideoTrack.current.stop();
-        programVideoTrack.current = null;
-      }
+      await sendBridgeControl("program-stop");
       if (programAudioTrack.current) {
         await room.localParticipant.unpublishTrack(programAudioTrack.current);
         programAudioTrack.current.stop();
@@ -375,15 +364,12 @@ export default function StudioPage() {
     };
     audioMixSettingsRef.current = next;
     setAudioMixSettings(next);
-    if (programVideoTrack.current) void syncAudioMixer(audioSourcesRef.current, next, true);
+    if (programAudioTrack.current) void syncAudioMixer(audioSourcesRef.current, next, true);
   }
 
   async function syncAudioMixer(sources: AudioSource[], settings: Record<string, AudioMixSetting>, shouldPublish: boolean) {
     const selected = sources.filter((source) => settings[source.id]?.enabled);
-    if (!programAudioEnabledRef.current || selected.length === 0) {
-      await programAudioTrack.current?.mute();
-      return;
-    }
+    const hasProgramAudio = programAudioEnabledRef.current && selected.length > 0;
 
     prepareAudioMixerContext();
     const context = audioContextRef.current!;
@@ -395,25 +381,32 @@ export default function StudioPage() {
     });
     audioMixerNodesRef.current.clear();
 
-    selected.forEach((audioSource) => {
-      const mediaStream = new MediaStream([audioSource.track.mediaStreamTrack]);
-      const sourceNode = context.createMediaStreamSource(mediaStream);
-      const gainNode = context.createGain();
-      gainNode.gain.value = (settings[audioSource.id]?.volume ?? 100) / 100;
-      sourceNode.connect(gainNode).connect(destination);
-      audioMixerNodesRef.current.set(audioSource.id, { source: sourceNode, gain: gainNode });
-    });
+    if (hasProgramAudio) {
+      selected.forEach((audioSource) => {
+        const mediaStream = new MediaStream([audioSource.track.mediaStreamTrack]);
+        const sourceNode = context.createMediaStreamSource(mediaStream);
+        const gainNode = context.createGain();
+        gainNode.gain.value = (settings[audioSource.id]?.volume ?? 100) / 100;
+        sourceNode.connect(gainNode).connect(destination);
+        audioMixerNodesRef.current.set(audioSource.id, { source: sourceNode, gain: gainNode });
+      });
+    }
 
-    if (shouldPublish && !programAudioTrack.current && outputPublisherRoom.current) {
+    if (shouldPublish && !programAudioTrack.current && publisherRoom.current) {
       const mixedTrack = destination.stream.getAudioTracks()[0];
       const localAudio = new LocalAudioTrack(mixedTrack, undefined, true);
-      await outputPublisherRoom.current.localParticipant.publishTrack(localAudio, {
-        name: "program-audio",
+      await publisherRoom.current.localParticipant.publishTrack(localAudio, {
+        name: "program-mix-audio",
+        stream: "program",
         source: Track.Source.Microphone,
       });
       programAudioTrack.current = localAudio;
-    } else {
+    }
+
+    if (hasProgramAudio) {
       await programAudioTrack.current?.unmute();
+    } else {
+      await programAudioTrack.current?.mute();
     }
   }
 
@@ -440,20 +433,15 @@ export default function StudioPage() {
   }
 
   async function disconnectAll() {
-    monitorRoom.current?.disconnect();
     outputPublisherRoom.current?.disconnect();
     publisherRoom.current?.disconnect();
-    programVideoTrack.current?.stop();
     programAudioTrack.current?.stop();
     previewAudioElement.current?.remove();
     void destroyAudioMixer();
-    monitorRoom.current = null;
     outputPublisherRoom.current = null;
     publisherRoom.current = null;
-    programVideoTrack.current = null;
     programAudioTrack.current = null;
     previewAudioElement.current = null;
-    programSwitchQueue.current = Promise.resolve();
     setViewerCount(0);
     if (outputVideo.current) outputVideo.current.srcObject = null;
     setCameras([]);

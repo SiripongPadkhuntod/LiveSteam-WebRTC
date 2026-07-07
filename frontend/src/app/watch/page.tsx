@@ -45,8 +45,8 @@ export default function WatchPage() {
     setStatus("connecting");
     setMessage("กำลังเชื่อมต่อ…");
     try {
-      const credentials = await getConnectionToken(participantID("viewer"), programRoomID(roomName), "viewer");
-      const room = new Room({ adaptiveStream: true });
+      const credentials = await getConnectionToken(participantID("viewer"), programRoomID(roomName), "viewer", "d1");
+      const room = new Room({ adaptiveStream: false, dynacast: false });
       const refreshViewerCount = () => {
         const remoteViewers = Array.from(room.remoteParticipants.values())
           .filter((participant) => participant.identity.startsWith("viewer-")).length;

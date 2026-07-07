@@ -6,15 +6,18 @@ Local WebRTC broadcast studio with two camera previews, one switchable program f
 
 - **Frontend:** Next.js + TypeScript + LiveKit Client
 - **Control API:** Go; creates short-lived, role-limited LiveKit tokens
-- **Media:** LiveKit SFU + Redis, running locally with Docker Compose
+- **Source media:** LiveKit SFU + Redis receives raw camera/microphone sources for Studio
+- **D1 simulator:** a second isolated LiveKit SFU + Redis pair receives exactly one Program Publisher Session and serves viewers
 - **Room codes:** Studio creates a room and shares its six-character code with camera devices
 - **Camera sources:** each `/camera` page enters a room code and publishes directly into that LiveKit room
 - **Microphone sources:** each `/microphone` page enters a room code and publishes audio without video
 - **Studio input:** subscribes to raw camera and microphone sources from the private Source Room
-- **Output publisher:** a separate LiveKit participant/session publishes `program-video` and `program-audio` together into an isolated Program Room
-- **Audio mixer:** Studio selects any combination of camera and microphone audio, adjusts per-source volume, and mixes them into one `program-audio` track
-- **Program monitor:** a separate subscribe-only LiveKit connection in the studio page
-- **Viewer:** joins only the Program Room and selectively subscribes to `program-video` and `program-audio`; it never joins the raw Source Room
+- **Program bridge:** Go subscribes to the selected H.264 source on the Source SFU and forwards its RTP packets to D1 without browser Canvas capture or a second video encode
+- **Output publisher:** the Go bridge is the only D1 publisher; one participant/session publishes `program-video` and `program-audio` under stream `program`
+- **Video switching:** Studio sends a reliable control message to the bridge; the bridge requests an IDR keyframe and preserves RTP sequence/timestamp continuity across cameras
+- **Audio mixer:** Studio selects any combination of camera and microphone audio, adjusts per-source volume, publishes one mixed track to the Source SFU, and the Go bridge forwards it to D1
+- **Program monitor:** Studio joins D1 as a subscribe-only participant and sees the same Program tracks as viewers
+- **Viewer:** joins only the Program Room on D1 and selectively subscribes to `program-video` and `program-audio`; it never joins the Source SFU
 
 ## Requirements
 
@@ -49,13 +52,40 @@ Open:
 - Channels: http://localhost:3000/channels
 - API health: http://localhost:8080/health
 
+Local WebRTC endpoints:
+
+- Source SFU signaling/TCP/UDP: `7880` / `7881` / `7882`
+- D1 signaling/TCP/UDP: `7980` / `7981` / `7982`
+- LAN HTTPS application: `3443`
+- Source/D1 secure signaling gateways: `7443` / `7444`
+
 Open `/channels`, create a broadcast room, and share the generated six-character code with each source device. On `/camera`, enter that code for video and camera audio; use `/microphone` for an audio-only source. Cameras and microphones publish directly into the room. Studio selects the Program video and mixes the required audio sources before starting the broadcast. Viewers receive only the Program tracks.
 
 Room records are currently stored in Go process memory for local development. Restarting the Go backend clears the room list and invalidates previously generated codes.
 
-## Local network testing
+## Local network testing from a phone or another computer
 
-`localhost` is a browser secure context, but a LAN IP over plain HTTP is not. To test from phones or other computers, put the frontend, API, and LiveKit signaling endpoint behind locally trusted HTTPS/WSS (for example with `mkcert` and Caddy), advertise the host LAN IP to LiveKit, and allow TCP 7880/7881 plus UDP 7882 through the host firewall.
+`make infra-up` detects the host LAN IP and starts Caddy with locally trusted HTTPS for the application plus WSS gateways for both LiveKit servers. WebRTC media does not pass through Caddy; it continues directly over the LiveKit UDP/TCP media ports.
+
+The first time a device connects, install Caddy's local CA certificate:
+
+1. Keep the server and device on the same Wi-Fi/LAN.
+2. Run `make infra-up` and note the LAN IP printed by the command.
+3. On the other device, open `http://LAN_IP:8081/root.crt` and install the certificate.
+4. On iPhone/iPad, also enable it under **Settings > General > About > Certificate Trust Settings**.
+5. Open `https://LAN_IP:3443/camera` or `https://LAN_IP:3443/microphone`.
+
+For example, if the server prints `192.168.1.10`:
+
+```text
+Certificate: http://192.168.1.10:8081/root.crt
+Camera:      https://192.168.1.10:3443/camera
+Microphone:  https://192.168.1.10:3443/microphone
+Studio:      https://192.168.1.10:3443/studio
+Viewer:      https://192.168.1.10:3443/watch
+```
+
+Allow inbound TCP `3443`, `7443`, `7444`, `7881`, `7981`, `8081` and UDP `7882`, `7982` in the host firewall. The certificate is only for LAN development; do not distribute Caddy's CA private key. Internet clients still require a public deployment and TURN.
 
 ## Configuration
 
@@ -65,6 +95,9 @@ The checked-in credentials are development-only. Override them before using any 
 LIVEKIT_API_KEY=devkey
 LIVEKIT_API_SECRET=devsecret_devsecret_devsecret_12345
 LIVEKIT_URL=
+D1_LIVEKIT_API_KEY=d1key
+D1_LIVEKIT_API_SECRET=d1secret_d1secret_d1secret_12345
+D1_LIVEKIT_URL=
 ALLOWED_ORIGINS=http://localhost:3000,http://localhost:3001
 ALLOW_PRIVATE_ORIGINS=true
 ```
@@ -77,6 +110,7 @@ NEXT_PUBLIC_API_URL=
 CONTROL_API_URL=http://127.0.0.1:8080
 # Set this when LiveKit signaling is exposed through HTTPS/WSS.
 LIVEKIT_PUBLIC_URL=
+D1_LIVEKIT_PUBLIC_URL=
 ```
 
 ## Test a camera through Microsoft Dev Tunnels
@@ -98,10 +132,4 @@ Never expose the LiveKit API secret in frontend code.
 
 ## Viewer on another device in the LAN
 
-Run `make infra-up`; it detects the Mac LAN address and configures LiveKit to advertise that address. Start the frontend on all interfaces, then open the viewer URL from another device using the Mac IP, for example:
-
-```text
-http://192.168.1.10:3001/watch
-```
-
-The viewer page works over LAN HTTP. Camera and microphone capture on a non-localhost device requires HTTPS because browsers only expose `getUserMedia` in a secure context.
+Use the same HTTPS entry point, for example `https://192.168.1.10:3443/watch`. Viewers receive secure D1 signaling through port `7444`, while D1 media travels over UDP `7982` with TCP `7981` as the fallback.

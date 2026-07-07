@@ -6,6 +6,13 @@ services:
     volumes:
       - redis-data:/data
 
+  redis-d1:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - redis-d1-data:/data
+
   livekit:
     image: livekit/livekit-server:latest
     restart: unless-stopped
@@ -19,6 +26,19 @@ services:
     volumes:
       - ./livekit.yaml:/etc/livekit.yaml:ro
 
+  d1:
+    image: livekit/livekit-server:latest
+    restart: unless-stopped
+    command: --config /etc/livekit-d1.yaml --node-ip ${LIVEKIT_NODE_IP:-127.0.0.1}
+    depends_on:
+      - redis-d1
+    ports:
+      - "7980:7980"
+      - "7981:7981"
+      - "7982:7982/udp"
+    volumes:
+      - ./livekit-d1.yaml:/etc/livekit-d1.yaml:ro
+
   backend:
     build:
       context: ../backend
@@ -29,11 +49,17 @@ services:
       - LIVEKIT_API_KEY=devkey
       - LIVEKIT_API_SECRET=devsecret_devsecret_devsecret_12345
       - LIVEKIT_URL=${LIVEKIT_URL:-ws://127.0.0.1:7880}
+      - LIVEKIT_INTERNAL_URL=ws://livekit:7880
+      - D1_LIVEKIT_API_KEY=d1key
+      - D1_LIVEKIT_API_SECRET=d1secret_d1secret_d1secret_12345
+      - D1_LIVEKIT_URL=${D1_LIVEKIT_URL:-ws://127.0.0.1:7980}
+      - D1_LIVEKIT_INTERNAL_URL=ws://d1:7980
     ports:
       - "8080:8080"
     depends_on:
       - redis
       - livekit
+      - d1
 
   frontend:
     build:
@@ -42,11 +68,35 @@ services:
     restart: unless-stopped
     environment:
       - CONTROL_API_URL=http://backend:8080
+      - LIVEKIT_PUBLIC_URL=wss://${LIVEKIT_NODE_IP:-127.0.0.1}:7443
+      - D1_LIVEKIT_PUBLIC_URL=wss://${LIVEKIT_NODE_IP:-127.0.0.1}:7444
       - PORT=3001
     ports:
       - "3001:3001"
     depends_on:
       - backend
 
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      - LAN_IP=${LIVEKIT_NODE_IP:-127.0.0.1}
+    ports:
+      - "3443:3443"
+      - "7443:7443"
+      - "7444:7444"
+      - "8081:8081"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - frontend
+      - livekit
+      - d1
+
 volumes:
   redis-data:
+  redis-d1-data:
+  caddy-data:
+  caddy-config:
