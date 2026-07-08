@@ -1,7 +1,7 @@
 "use client";
 
-import { useRef, useState, type ChangeEvent, type PointerEvent as ReactPointerEvent } from "react";
-import { Eye, EyeOff, ImagePlus, Layers3, Trash2 } from "lucide-react";
+import { useRef, useState, type ChangeEvent, type DragEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { Eye, EyeOff, GripVertical, ImagePlus, Layers3, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { uploadSceneAsset } from "@/lib/api";
 import type { SceneImageLayer } from "@/lib/scene";
@@ -113,6 +113,7 @@ export function SceneLayerPanel({
   const fileInput = useRef<HTMLInputElement>(null);
   const [error, setError] = useState("");
   const [uploading, setUploading] = useState(false);
+  const [draggingID, setDraggingID] = useState<string | null>(null);
 
   async function addImage(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
@@ -150,6 +151,23 @@ export function SceneLayerPanel({
     onChange(layers.map((layer) => layer.id === id ? { ...layer, ...patch } : layer));
   }
 
+  function reorderLayers(targetID: string) {
+    if (!draggingID || draggingID === targetID) return;
+    const ordered = [...layers].sort((a, b) => b.zIndex - a.zIndex);
+    const from = ordered.findIndex((layer) => layer.id === draggingID);
+    const to = ordered.findIndex((layer) => layer.id === targetID);
+    if (from < 0 || to < 0) return;
+    const [moved] = ordered.splice(from, 1);
+    ordered.splice(to, 0, moved);
+    onChange(ordered.map((layer, index) => ({ ...layer, zIndex: ordered.length - index })));
+  }
+
+  function allowLayerDrop(event: DragEvent<HTMLButtonElement>) {
+    if (disabled) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+  }
+
   return (
     <div className="scene-layer-panel">
       <div className="scene-layer-toolbar">
@@ -169,7 +187,25 @@ export function SceneLayerPanel({
       ) : (
         <div className="scene-layer-list">
           {[...layers].sort((a, b) => b.zIndex - a.zIndex).map((layer) => (
-            <button key={layer.id} className={selectedID === layer.id ? "selected" : ""} onClick={() => onSelect(layer.id)}>
+            <button
+              key={layer.id}
+              className={`${selectedID === layer.id ? "selected" : ""} ${draggingID === layer.id ? "dragging" : ""}`}
+              draggable={!disabled}
+              onDragStart={(event) => {
+                setDraggingID(layer.id);
+                event.dataTransfer.effectAllowed = "move";
+                event.dataTransfer.setData("text/plain", layer.id);
+              }}
+              onDragOver={allowLayerDrop}
+              onDrop={(event) => {
+                event.preventDefault();
+                reorderLayers(layer.id);
+                setDraggingID(null);
+              }}
+              onDragEnd={() => setDraggingID(null)}
+              onClick={() => onSelect(layer.id)}
+            >
+              <GripVertical className="scene-layer-drag-handle" size={15} aria-label="ลากเพื่อเปลี่ยนลำดับ" />
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img src={layer.src} alt="" />
               <span><strong>{layer.name}</strong><small>IMAGE · Z {layer.zIndex}</small></span>
