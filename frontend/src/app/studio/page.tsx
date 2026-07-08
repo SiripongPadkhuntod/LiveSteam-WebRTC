@@ -19,7 +19,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardBody, CardHeader } from "@/components/ui/card";
 import { SceneLayerPanel, SceneOverlay } from "@/components/studio/scene-editor";
-import { emptyProgramScene, type SceneImageLayer } from "@/lib/scene";
+import { emptyProgramScene, type ProgramScene, type SceneImageLayer } from "@/lib/scene";
 import { RadioTower, Users, Video, Mic, Play, Square, Volume2, VolumeX, MonitorOff, UserX, CheckCircle2, X } from "lucide-react";
 
 type CameraSource = {
@@ -48,6 +48,9 @@ export default function StudioPage() {
   const publisherRoom = useRef<Room | null>(null);
   const outputPublisherRoom = useRef<Room | null>(null);
   const programMonitorVideoTrack = useRef<RemoteTrack | null>(null);
+  const directProgramVideoTrack = useRef<RemoteTrack | null>(null);
+  const composedProgramVideoTrack = useRef<RemoteTrack | null>(null);
+  const composedProgramPublication = useRef<RemoteTrackPublication | null>(null);
   const programAudioTrack = useRef<LocalAudioTrack | null>(null);
   const previewAudioElement = useRef<HTMLAudioElement | null>(null);
   const programAudioEnabledRef = useRef(true);
@@ -75,11 +78,14 @@ export default function StudioPage() {
   const [roomName, setRoomName] = useState(DEFAULT_CHANNEL_ID);
   const [roomCode, setRoomCode] = useState("");
   const [scene, setScene] = useState(() => emptyProgramScene(DEFAULT_CHANNEL_ID));
+  const [programScene, setProgramScene] = useState<ProgramScene>(() => emptyProgramScene(DEFAULT_CHANNEL_ID));
+  const [previewSceneDirty, setPreviewSceneDirty] = useState(false);
   const [loadedSceneRoom, setLoadedSceneRoom] = useState<string | null>(null);
   const [selectedSceneLayerID, setSelectedSceneLayerID] = useState<string | null>(null);
 
   const activeCameraIdRef = useRef<string | null>(null);
   const previewCameraIdRef = useRef<string | null>(null);
+  const programSceneRef = useRef(programScene);
   const statusRef = useRef(status);
   
   useEffect(() => {
@@ -100,6 +106,7 @@ export default function StudioPage() {
           if (legacyScene.layers?.length) {
             legacyScene.revision = Math.max(serverScene.revision + 1, legacyScene.revision);
             setScene(legacyScene);
+            setProgramScene(legacyScene);
             sceneDirtyRef.current = true;
             setLoadedSceneRoom(roomName);
             return;
@@ -108,10 +115,13 @@ export default function StudioPage() {
       }
       sceneDirtyRef.current = false;
       setScene(serverScene);
+      setProgramScene(serverScene);
+      setPreviewSceneDirty(false);
       setLoadedSceneRoom(roomName);
     }).catch((error) => {
       if (cancelled) return;
       setScene(emptyProgramScene(roomName));
+      setProgramScene(emptyProgramScene(roomName));
       setMessage(error instanceof Error ? error.message : "โหลด Scene ไม่สำเร็จ");
     });
     return () => { cancelled = true; };
@@ -148,6 +158,10 @@ export default function StudioPage() {
   useEffect(() => {
     previewCameraIdRef.current = previewCameraId;
   }, [previewCameraId]);
+
+  useEffect(() => {
+    programSceneRef.current = programScene;
+  }, [programScene]);
 
   useEffect(() => {
     if (!activeCameraId || loadedSceneRoom !== roomName || scene.sourceId === activeCameraId) return;
@@ -332,10 +346,15 @@ export default function StudioPage() {
           .filter((participant) => participant.identity.startsWith("viewer-")).length;
         setViewerCount(viewers);
       };
-      outRoom.on(RoomEvent.ParticipantConnected, refreshViewerCount);
+      outRoom.on(RoomEvent.ParticipantConnected, (participant) => {
+        refreshViewerCount();
+        if (participant.identity.startsWith("viewer-")) {
+          void publishProgramSceneSnapshot(programSceneRef.current, outRoom, [participant.identity]);
+        }
+      });
       outRoom.on(RoomEvent.ParticipantDisconnected, refreshViewerCount);
       const subscribeToProgram = (publication: RemoteTrackPublication) => {
-        if (publication.trackName === "program-video" || publication.trackName === "program-audio") {
+        if (publication.trackName === "program-video" || publication.trackName === "program-audio" || publication.trackName === "compositor-preview-video") {
           publication.setSubscribed(true);
         }
       };
@@ -344,6 +363,14 @@ export default function StudioPage() {
       outRoom.on(RoomEvent.TrackUnsubscribed, (track) => {
         track.detach();
         if (programMonitorVideoTrack.current === track) programMonitorVideoTrack.current = null;
+        if (directProgramVideoTrack.current === track) directProgramVideoTrack.current = null;
+        if (composedProgramVideoTrack.current === track) composedProgramVideoTrack.current = null;
+      });
+      outRoom.on(RoomEvent.TrackUnmuted, (publication) => {
+        if (publication.trackName === "compositor-preview-video") selectD1MonitorTrack();
+      });
+      outRoom.on(RoomEvent.TrackMuted, (publication) => {
+        if (publication.trackName === "compositor-preview-video") selectD1MonitorTrack();
       });
       await outRoom.connect(outputCredentials.url, outputCredentials.token, { autoSubscribe: false });
       outRoom.remoteParticipants.forEach((participant) => {
@@ -378,15 +405,21 @@ export default function StudioPage() {
   }
 
   async function performCut() {
-    if (!previewCameraId || previewCameraId === activeCameraId) return;
+    if (!previewCameraId) return;
     const oldActive = activeCameraId;
-    if (status === "live") {
-      await switchCamera(previewCameraId);
-    } else {
-      setActiveCameraId(previewCameraId);
-      setInputVideoQuality(cameras, previewCameraId, oldActive);
+    if (previewCameraId !== activeCameraId) {
+      if (status === "live") {
+        await switchCamera(previewCameraId);
+      } else {
+        setActiveCameraId(previewCameraId);
+        setInputVideoQuality(cameras, previewCameraId, oldActive);
+      }
+      if (oldActive) setPreviewCameraId(oldActive);
     }
-    if (oldActive) setPreviewCameraId(oldActive);
+    const nextProgramScene = { ...scene, sourceId: previewCameraId, layers: scene.layers.map((layer) => ({ ...layer })) };
+    setProgramScene(nextProgramScene);
+    await publishProgramSceneSnapshot(nextProgramScene);
+    setPreviewSceneDirty(false);
   }
 
   function setInputVideoQuality(sources: CameraSource[], programCameraID: string | null, previewCamID: string | null = null) {
@@ -404,7 +437,7 @@ export default function StudioPage() {
     const data = new TextEncoder().encode(JSON.stringify({ type, sourceId }));
     await publisherRoom.current.localParticipant.publishData(data, {
       reliable: true,
-      destinationIdentities: [`bridge-${roomName}`],
+      destinationIdentities: [`bridge-${roomName}`, `compositor-${roomName}`],
     });
   }
 
@@ -439,7 +472,11 @@ export default function StudioPage() {
         prepareAudioMixerContext();
       }
       await syncAudioMixer(audioSourcesRef.current, audioMixSettingsRef.current, true);
+      const nextProgramScene = { ...scene, sourceId: activeCameraId, layers: scene.layers.map((layer) => ({ ...layer })) };
+      setProgramScene(nextProgramScene);
+      setPreviewSceneDirty(false);
       await sendBridgeControl("program-start", activeCameraId);
+      await publishProgramSceneSnapshot(nextProgramScene);
       statusRef.current = "live";
       setStatus("live");
       setMessage(`กำลังถ่ายทอดสดจาก ${activeCameraId} · H.264 RTP passthrough`);
@@ -573,6 +610,9 @@ export default function StudioPage() {
     outputPublisherRoom.current = null;
     publisherRoom.current = null;
     programMonitorVideoTrack.current = null;
+    directProgramVideoTrack.current = null;
+    composedProgramVideoTrack.current = null;
+    composedProgramPublication.current = null;
     programAudioTrack.current = null;
     previewAudioElement.current = null;
     setViewerCount(0);
@@ -599,18 +639,46 @@ export default function StudioPage() {
   const isBusy = status === "connecting";
 
   function attachProgramMonitorTrack(track: RemoteTrack, publication: RemoteTrackPublication) {
-    if (publication.trackName === "program-video") {
-      programMonitorVideoTrack.current = track;
-      if (statusRef.current === "live" && outputVideo.current) {
-        track.attach(outputVideo.current);
-      }
+    if (publication.trackName === "program-video") directProgramVideoTrack.current = track;
+    if (publication.trackName === "compositor-preview-video") {
+      composedProgramVideoTrack.current = track;
+      composedProgramPublication.current = publication;
     }
+    selectD1MonitorTrack();
+  }
+
+  function selectD1MonitorTrack() {
+    const composed = composedProgramVideoTrack.current;
+    const composedReady = composed && !composedProgramPublication.current?.isMuted;
+    // Keep the live path operational while the local reference compositor is
+    // experimental. The bridge's program-video is already carried by D1 and
+    // preserves the source WebRTC stream without the extra decode/encode hop.
+    const selected = directProgramVideoTrack.current ?? (composedReady ? composed : null);
+    if (programMonitorVideoTrack.current && programMonitorVideoTrack.current !== selected) {
+      programMonitorVideoTrack.current.detach();
+    }
+    programMonitorVideoTrack.current = selected ?? null;
+    if (statusRef.current === "live" && selected && outputVideo.current) selected.attach(outputVideo.current);
   }
 
 
   function updateSceneLayers(layers: SceneImageLayer[]) {
     sceneDirtyRef.current = true;
+    setPreviewSceneDirty(true);
     setScene((current) => ({ ...current, revision: current.revision + 1, layers }));
+  }
+
+  async function publishProgramSceneSnapshot(
+    nextScene: ProgramScene,
+    room: Room | null = outputPublisherRoom.current,
+    destinationIdentities?: string[],
+  ) {
+    if (!room || room.state !== ConnectionState.Connected) return;
+    const payload = new TextEncoder().encode(JSON.stringify({ type: "program-scene", scene: nextScene }));
+    await room.localParticipant.publishData(payload, {
+      reliable: true,
+      destinationIdentities,
+    });
   }
 
   return (
@@ -636,11 +704,30 @@ export default function StudioPage() {
           <p className="eyebrow" style={{ color: "var(--brand-accent)", marginBottom: "8px" }}>BROADCAST CONTROL</p>
           <h1 className="h1">Studio</h1>
         </div>
-        <div className="room-label text-sm" style={{ textAlign: "right" }}>
-          <span style={{ display: "block", color: "var(--text-tertiary)", fontSize: "11px", letterSpacing: "0.1em", marginBottom: "4px" }}>
-            ROOM {roomCode ? `· CODE ${roomCode}` : ""}
-          </span>
-          {channelByID(roomName).name} · {roomName}
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: "12px" }}>
+          <div className="room-label text-sm" style={{ textAlign: "right" }}>
+            <span style={{ display: "block", color: "var(--text-tertiary)", fontSize: "11px", letterSpacing: "0.1em", marginBottom: "4px" }}>
+              ROOM {roomCode ? `· CODE ${roomCode}` : ""}
+            </span>
+            {channelByID(roomName).name} · {roomName}
+          </div>
+          {roomCode && (
+            <div style={{ display: "flex", gap: "8px" }}>
+              <Button variant="secondary" size="sm" onClick={() => { navigator.clipboard.writeText(roomCode); alert("คัดลอก Room Code เรียบร้อยแล้ว: " + roomCode); }} title="Copy Room Code">
+                <span style={{ fontSize: "12px" }}>Copy Code</span>
+              </Button>
+              <Link href={`/camera?room=${roomName}&code=${roomCode}`} target="_blank">
+                <Button variant="secondary" size="sm">
+                  <Video size={14} style={{ marginRight: "6px" }} /> <span style={{ fontSize: "12px" }}>ต่อกล้อง</span>
+                </Button>
+              </Link>
+              <Link href={`/microphone?room=${roomName}&code=${roomCode}`} target="_blank">
+                <Button variant="secondary" size="sm">
+                  <Mic size={14} style={{ marginRight: "6px" }} /> <span style={{ fontSize: "12px" }}>ต่อไมค์</span>
+                </Button>
+              </Link>
+            </div>
+          )}
         </div>
       </section>
 
@@ -660,15 +747,13 @@ export default function StudioPage() {
               <CardBody style={{ padding: 0 }}>
                 <div className="program-frame" style={{ width: "100%", aspectRatio: "16/9", position: "relative", backgroundColor: "#000" }}>
                   <video ref={previewVideo} autoPlay playsInline muted style={{ width: "100%", height: "100%", objectFit: "contain" }} />
-                  {!isLive && (
-                    <SceneOverlay
-                      layers={scene.layers}
-                      selectedID={selectedSceneLayerID}
-                      disabled={!isConnected}
-                      onSelect={setSelectedSceneLayerID}
-                      onChange={updateSceneLayers}
-                    />
-                  )}
+                  <SceneOverlay
+                    layers={scene.layers}
+                    selectedID={selectedSceneLayerID}
+                    disabled={!isConnected}
+                    onSelect={setSelectedSceneLayerID}
+                    onChange={updateSceneLayers}
+                  />
                   {previewCameraId && (
                     <Badge variant="success" showDot style={{ position: "absolute", top: "16px", left: "16px", background: "rgba(0,0,0,0.6)", backdropFilter: "blur(4px)" }}>
                       PREVIEW · {previewCameraId.split('-').pop()}
@@ -688,7 +773,7 @@ export default function StudioPage() {
               <Button 
                 variant="primary" 
                 size="sm" 
-                disabled={!isConnected || !previewCameraId || previewCameraId === activeCameraId}
+                disabled={!isConnected || !previewCameraId || (previewCameraId === activeCameraId && !previewSceneDirty)}
                 onClick={performCut}
                 style={{ minWidth: "60px", height: "40px" }}
               >
@@ -710,6 +795,13 @@ export default function StudioPage() {
               <CardBody style={{ padding: 0 }}>
                 <div className="program-frame" style={{ width: "100%", aspectRatio: "16/9", position: "relative", backgroundColor: "#000" }}>
                   <video ref={outputVideo} autoPlay playsInline muted style={{ width: "100%", height: "100%", objectFit: "contain" }} />
+                  <SceneOverlay
+                    layers={programScene.layers}
+                    selectedID={null}
+                    disabled
+                    onSelect={() => {}}
+                    onChange={() => {}}
+                  />
                   {isLive && activeCameraId && (
                     <Badge variant="live" showDot style={{ position: "absolute", top: "16px", left: "16px", background: "rgba(0,0,0,0.6)", backdropFilter: "blur(4px)" }}>
                       LIVE · {activeCameraId.split('-').pop()}
@@ -736,37 +828,17 @@ export default function StudioPage() {
           </div>
 
           {isConnected && (
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "24px" }}>
-              <Card>
-                <CardBody style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "20px 24px", height: "100%" }}>
-                  <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
-                    <span className="text-sm" style={{ letterSpacing: "0.1em", fontWeight: 600 }}>PRE-BROADCAST CHECK</span>
-                    <strong style={{ fontSize: "15px" }}>{activeCameraId ? `กล้องเริ่มต้น: ${activeCameraId.split('-').pop()}` : "รอกล้องเชื่อมต่อ"}</strong>
-                    <span className="text-sm" style={{ color: "var(--text-tertiary)", marginTop: "4px" }}>Output Session: {programRoomID(roomName)}</span>
-                  </div>
-                  <Button 
-                    variant={programAudioEnabled ? "primary" : "secondary"} 
-                    onClick={toggleProgramAudio}
-                    style={{ gap: "8px" }}
-                  >
-                    {programAudioEnabled ? <Volume2 size={16} /> : <VolumeX size={16} />}
-                    Program Audio: {programAudioEnabled ? "ON" : "OFF"}
-                  </Button>
-                </CardBody>
-              </Card>
-
-              <Card>
-                <CardBody style={{ padding: "20px 24px", height: "100%" }}>
-                  <SceneLayerPanel
-                    layers={scene.layers}
-                    selectedID={selectedSceneLayerID}
-                    disabled={isLive}
-                    onSelect={setSelectedSceneLayerID}
-                    onChange={updateSceneLayers}
-                  />
-                </CardBody>
-              </Card>
-            </div>
+            <Card>
+              <CardBody style={{ padding: "20px 24px", height: "100%" }}>
+                <SceneLayerPanel
+                  layers={scene.layers}
+                  selectedID={selectedSceneLayerID}
+                  disabled={false}
+                  onSelect={setSelectedSceneLayerID}
+                  onChange={updateSceneLayers}
+                />
+              </CardBody>
+            </Card>
           )}
         </div>
 
@@ -832,11 +904,30 @@ export default function StudioPage() {
       </div>
 
       <footer className="control-dock" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", position: "fixed", bottom: 0, left: 0, right: 0, padding: "16px 24px", background: "rgba(10,10,10,0.85)", backdropFilter: "blur(12px)", borderTop: "1px solid var(--border-strong)", zIndex: 100 }}>
-        <div style={{ color: status === "error" ? "var(--danger)" : "var(--text-secondary)", fontSize: "14px", display: "flex", alignItems: "center", gap: "8px" }}>
-          {status === "error" && <UserX size={16} />}
-          {message}
-        </div>
-        <div className="dock-actions" style={{ display: "flex", gap: "12px" }}>
+        {isConnected ? (
+          <div style={{ display: "flex", alignItems: "center", gap: "24px" }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: "2px" }}>
+              <span style={{ fontSize: "11px", letterSpacing: "0.1em", fontWeight: 600, color: "var(--text-secondary)" }}>PRE-BROADCAST CHECK</span>
+              <strong style={{ fontSize: "13px", margin: "2px 0" }}>{activeCameraId ? `กล้องเริ่มต้น: ${activeCameraId.split('-').pop()}` : "รอกล้องเชื่อมต่อ"}</strong>
+              <span style={{ fontSize: "11px", color: "var(--text-tertiary)" }}>Session: {programRoomID(roomName)}</span>
+            </div>
+            <Button 
+              variant={programAudioEnabled ? "primary" : "secondary"} 
+              size="sm"
+              onClick={toggleProgramAudio}
+              style={{ gap: "6px" }}
+            >
+              {programAudioEnabled ? <Volume2 size={14} /> : <VolumeX size={14} />}
+              Audio: {programAudioEnabled ? "ON" : "OFF"}
+            </Button>
+          </div>
+        ) : (
+          <div style={{ color: status === "error" ? "var(--danger)" : "var(--text-secondary)", fontSize: "14px", display: "flex", alignItems: "center", gap: "8px" }}>
+            {status === "error" && <UserX size={16} />}
+            {message}
+          </div>
+        )}
+        <div className="dock-actions" style={{ display: "flex", gap: "12px", alignItems: "center" }}>
           {!isConnected && (
             <Button variant="primary" disabled={isBusy} onClick={connectStudio} isLoading={isBusy}>
               <Play size={16} /> เข้าควบคุม Studio

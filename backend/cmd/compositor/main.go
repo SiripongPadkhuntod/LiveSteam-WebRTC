@@ -18,7 +18,6 @@ import (
 
 	"github.com/livekit/protocol/livekit"
 	lksdk "github.com/livekit/server-sdk-go/v2"
-	"github.com/pion/rtp/codecs"
 	"github.com/pion/webrtc/v4"
 	"github.com/redis/go-redis/v9"
 )
@@ -50,6 +49,11 @@ type sceneUpdateEvent struct {
 	Scene programScene `json:"scene"`
 }
 
+type programControl struct {
+	Type     string `json:"type"`
+	SourceID string `json:"sourceId"`
+}
+
 type roomRuntime struct {
 	Room          string `json:"room"`
 	SceneID       string `json:"sceneId"`
@@ -65,14 +69,19 @@ type roomRuntime struct {
 }
 
 type mediaSession struct {
-	sourceRoom   *lksdk.Room
-	d1Room       *lksdk.Room
-	mu           sync.Mutex
-	sources      map[string]struct{}
-	tracks       map[string]*webrtc.TrackRemote
-	participants map[string]*lksdk.RemoteParticipant
-	scene        programScene
-	pipeline     *ffmpegPipeline
+	sourceRoom    *lksdk.Room
+	d1Room        *lksdk.Room
+	mu            sync.Mutex
+	reconcileMu   sync.Mutex
+	sources       map[string]struct{}
+	tracks        map[string]*webrtc.TrackRemote
+	participants  map[string]*lksdk.RemoteParticipant
+	scene         programScene
+	pipeline      *ffmpegPipeline
+	outputTrack   *webrtc.TrackLocalStaticRTP
+	outputPub     *lksdk.LocalTrackPublication
+	parameterSets map[string][][]byte
+	started       bool
 }
 
 type worker struct {
@@ -199,10 +208,17 @@ func (w *worker) applyScene(room string, scene programScene) {
 	if !assetsReady {
 		status = "waiting-assets"
 	}
-	w.rooms[room] = roomRuntime{
-		Room: room, SceneID: scene.ID, Revision: scene.Revision, VisibleLayers: visible,
-		AssetsReady: assetsReady, Status: status, UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+	runtime := w.rooms[room]
+	runtime.Room = room
+	runtime.SceneID = scene.ID
+	runtime.Revision = scene.Revision
+	runtime.VisibleLayers = visible
+	runtime.AssetsReady = assetsReady
+	if !runtime.SourceSFU || !runtime.D1 {
+		runtime.Status = status
 	}
+	runtime.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	w.rooms[room] = runtime
 	w.scenes[room] = scene
 	session := w.media[room]
 	w.mu.Unlock()
@@ -226,7 +242,7 @@ func (w *worker) ensureMediaSession(room string) {
 	}
 	session := &mediaSession{
 		sources: make(map[string]struct{}), tracks: make(map[string]*webrtc.TrackRemote),
-		participants: make(map[string]*lksdk.RemoteParticipant), scene: w.scenes[room],
+		participants: make(map[string]*lksdk.RemoteParticipant), parameterSets: make(map[string][][]byte), scene: w.scenes[room],
 	}
 	w.media[room] = session
 	runtime := w.rooms[room]
@@ -235,23 +251,57 @@ func (w *worker) ensureMediaSession(room string) {
 	w.mu.Unlock()
 
 	callback := lksdk.NewRoomCallback()
+	callback.OnDataPacket = func(data lksdk.DataPacket, params lksdk.DataReceiveParams) {
+		packet, ok := data.(*lksdk.UserDataPacket)
+		if !ok || !strings.HasPrefix(string(params.SenderIdentity), "studio-") {
+			return
+		}
+		var control programControl
+		if json.Unmarshal(packet.Payload, &control) != nil {
+			return
+		}
+		session.mu.Lock()
+		switch control.Type {
+		case "program-start", "program-switch":
+			session.started = true
+			if control.SourceID != "" {
+				session.scene.SourceID = control.SourceID
+			}
+			if session.outputPub != nil {
+				session.outputPub.SetMuted(false)
+			}
+		case "program-stop":
+			session.started = false
+			if session.outputPub != nil {
+				session.outputPub.SetMuted(true)
+			}
+		}
+		session.mu.Unlock()
+		if control.Type == "program-start" || control.Type == "program-switch" {
+			go w.reconcilePipeline(room, session)
+		}
+	}
 	callback.OnTrackSubscribed = func(track *webrtc.TrackRemote, publication *lksdk.RemoteTrackPublication, participant *lksdk.RemoteParticipant) {
 		if track.Kind() != webrtc.RTPCodecTypeVideo || publication.Name() != "camera-video" {
 			go drainTrack(track)
 			return
 		}
 		_ = publication.SetVideoQuality(livekit.VideoQuality_HIGH)
+		publication.SetVideoDimensions(1920, 1080)
 		sourceID := string(participant.Identity())
 		session.mu.Lock()
 		session.sources[sourceID] = struct{}{}
 		session.tracks[sourceID] = track
 		session.participants[sourceID] = participant
 		count := len(session.sources)
+		shouldReconcile := session.pipeline == nil && session.scene.SourceID == sourceID
 		session.mu.Unlock()
 		w.updateMediaRuntime(room, true, session.d1Room != nil, count, "media-ready")
 		w.logger.Info("compositor subscribed source video", "room", room, "source", participant.Identity(), "codec", track.Codec().MimeType)
 		go w.forwardSourceVideo(room, session, sourceID, track)
-		go w.reconcilePipeline(room, session)
+		if shouldReconcile {
+			go w.reconcilePipeline(room, session)
+		}
 	}
 	callback.OnTrackUnsubscribed = func(_ *webrtc.TrackRemote, publication *lksdk.RemoteTrackPublication, participant *lksdk.RemoteParticipant) {
 		if publication.Name() != "camera-video" {
@@ -296,22 +346,17 @@ func (w *worker) ensureMediaSession(room string) {
 }
 
 func (w *worker) forwardSourceVideo(room string, session *mediaSession, sourceID string, track *webrtc.TrackRemote) {
-	depacketizer := &codecs.H264Packet{}
 	for {
 		packet, _, err := track.ReadRTP()
 		if err != nil {
 			return
-		}
-		annexB, err := depacketizer.Unmarshal(packet.Payload)
-		if err != nil || len(annexB) == 0 {
-			continue
 		}
 		session.mu.Lock()
 		selected := session.scene.SourceID == sourceID
 		pipeline := session.pipeline
 		session.mu.Unlock()
 		if selected && pipeline != nil {
-			if err := pipeline.WriteAnnexB(annexB); err != nil {
+			if err := pipeline.WriteRTP(packet); err != nil {
 				w.logger.Warn("compositor input stopped", "room", room, "source", sourceID, "error", err)
 				return
 			}
@@ -320,16 +365,26 @@ func (w *worker) forwardSourceVideo(room string, session *mediaSession, sourceID
 }
 
 func (w *worker) reconcilePipeline(room string, session *mediaSession) {
+	session.reconcileMu.Lock()
+	defer session.reconcileMu.Unlock()
 	session.mu.Lock()
-	defer session.mu.Unlock()
 	if session.d1Room == nil || session.scene.SourceID == "" || session.tracks[session.scene.SourceID] == nil {
+		session.mu.Unlock()
 		return
 	}
-	if session.pipeline != nil {
-		session.pipeline.Stop()
-		session.pipeline = nil
+	scene := session.scene
+	d1Room := session.d1Room
+	oldPipeline := session.pipeline
+	outputTrack := session.outputTrack
+	outputPub := session.outputPub
+	started := session.started
+	inputCodec := session.tracks[scene.SourceID].Codec()
+	session.pipeline = nil
+	session.mu.Unlock()
+	if oldPipeline != nil {
+		oldPipeline.Stop()
 	}
-	pipeline, err := startFFmpegPipeline(session.d1Room, session.scene, w.assetDir, w.logger.With("room", room), func() {
+	pipeline, err := startFFmpegPipeline(d1Room, scene, w.assetDir, inputCodec, outputTrack, outputPub, w.logger.With("room", room), func() {
 		w.mu.Lock()
 		runtime := w.rooms[room]
 		runtime.OutputReady = true
@@ -347,13 +402,112 @@ func (w *worker) reconcilePipeline(room string, session *mediaSession) {
 		w.mu.Unlock()
 		return
 	}
+	pipeline.pub.SetMuted(!started)
+	session.mu.Lock()
 	session.pipeline = pipeline
-	selectedTrack := session.tracks[session.scene.SourceID]
-	selectedParticipant := session.participants[session.scene.SourceID]
+	session.outputTrack = pipeline.track
+	session.outputPub = pipeline.pub
+	selectedTrack := session.tracks[scene.SourceID]
+	selectedParticipant := session.participants[scene.SourceID]
+	session.mu.Unlock()
 	if selectedTrack != nil && selectedParticipant != nil {
 		selectedParticipant.WritePLI(selectedTrack.SSRC())
 	}
-	w.logger.Info("FFmpeg compositor started", "room", room, "source", session.scene.SourceID, "revision", session.scene.Revision)
+	w.logger.Info("FFmpeg compositor started", "room", room, "source", scene.SourceID, "revision", scene.Revision)
+}
+
+func extractH264ParameterSets(annexB []byte) [][]byte {
+	var result [][]byte
+	for offset := 0; offset+4 < len(annexB); {
+		start := -1
+		for index := offset; index+3 < len(annexB); index++ {
+			if annexB[index] == 0 && annexB[index+1] == 0 && ((annexB[index+2] == 1) || (index+3 < len(annexB) && annexB[index+2] == 0 && annexB[index+3] == 1)) {
+				start = index
+				break
+			}
+		}
+		if start < 0 {
+			break
+		}
+		header := start + 3
+		if annexB[start+2] == 0 {
+			header++
+		}
+		next := len(annexB)
+		for index := header + 1; index+3 < len(annexB); index++ {
+			if annexB[index] == 0 && annexB[index+1] == 0 && (annexB[index+2] == 1 || (annexB[index+2] == 0 && annexB[index+3] == 1)) {
+				next = index
+				break
+			}
+		}
+		if header < len(annexB) {
+			nalType := annexB[header] & 0x1f
+			if nalType == 7 || nalType == 8 {
+				result = append(result, append([]byte(nil), annexB[start:next]...))
+			}
+		}
+		offset = next
+	}
+	return result
+}
+
+func containsH264NALType(annexB []byte, wanted byte) bool {
+	for offset := 0; offset+4 < len(annexB); {
+		start, header, next := nextAnnexBNALU(annexB, offset)
+		if start < 0 {
+			return false
+		}
+		if header < len(annexB) && annexB[header]&0x1f == wanted {
+			return true
+		}
+		offset = next
+	}
+	return false
+}
+
+func nextAnnexBNALU(annexB []byte, offset int) (start, header, next int) {
+	start = -1
+	for index := offset; index+3 < len(annexB); index++ {
+		if annexB[index] == 0 && annexB[index+1] == 0 && (annexB[index+2] == 1 || (annexB[index+2] == 0 && annexB[index+3] == 1)) {
+			start = index
+			break
+		}
+	}
+	if start < 0 {
+		return -1, -1, len(annexB)
+	}
+	header = start + 3
+	if annexB[start+2] == 0 {
+		header++
+	}
+	next = len(annexB)
+	for index := header + 1; index+3 < len(annexB); index++ {
+		if annexB[index] == 0 && annexB[index+1] == 0 && (annexB[index+2] == 1 || (annexB[index+2] == 0 && annexB[index+3] == 1)) {
+			next = index
+			break
+		}
+	}
+	return start, header, next
+}
+
+func mergeH264ParameterSets(current, incoming [][]byte) [][]byte {
+	byType := make(map[byte][]byte)
+	for _, set := range append(current, incoming...) {
+		header := 3
+		if len(set) > 3 && set[2] == 0 {
+			header = 4
+		}
+		if header < len(set) {
+			byType[set[header]&0x1f] = append([]byte(nil), set...)
+		}
+	}
+	result := make([][]byte, 0, 2)
+	for _, nalType := range []byte{7, 8} {
+		if value := byType[nalType]; value != nil {
+			result = append(result, value)
+		}
+	}
+	return result
 }
 
 func drainTrack(track *webrtc.TrackRemote) {

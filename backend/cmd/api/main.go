@@ -249,6 +249,7 @@ func tokenHandler(cfg config) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "role must be broadcaster, monitor, or viewer")
 			return
 		}
+		grant.CanPublishData = boolPtr(req.Role == "broadcaster" || req.Role == "monitor")
 
 		apiKey := cfg.APIKey
 		apiSecret := cfg.APISecret

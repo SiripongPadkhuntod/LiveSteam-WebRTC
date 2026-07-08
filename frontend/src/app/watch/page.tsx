@@ -3,16 +3,22 @@
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { Room, RoomEvent, Track, type RemoteTrack, type RemoteTrackPublication } from "livekit-client";
-import { getConnectionToken, participantID } from "@/lib/api";
+import { getConnectionToken, getProgramScene, participantID } from "@/lib/api";
 import { channelByID, channelIDFromSearch, DEFAULT_CHANNEL_ID, programRoomID } from "@/lib/channels";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
+import { SceneOverlay } from "@/components/studio/scene-editor";
+import { emptyProgramScene, type ProgramScene } from "@/lib/scene";
 import { Users, Play, Square, Volume2, MonitorOff, UserX, Maximize, Minimize } from "lucide-react";
 export default function WatchPage() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const viewerFrameRef = useRef<HTMLDivElement>(null);
   const roomRef = useRef<Room | null>(null);
+  const selectedVideoTrack = useRef<RemoteTrack | null>(null);
+  const directVideoTrack = useRef<RemoteTrack | null>(null);
+  const composedVideoTrack = useRef<RemoteTrack | null>(null);
+  const composedVideoPublication = useRef<RemoteTrackPublication | null>(null);
   const audioElements = useRef<HTMLAudioElement[]>([]);
   const [status, setStatus] = useState<"idle" | "connecting" | "watching" | "error">("idle");
   const [message, setMessage] = useState("กดรับชมเพื่อเชื่อมต่อ Live Stream");
@@ -22,6 +28,7 @@ export default function WatchPage() {
   const [hasProgramVideo, setHasProgramVideo] = useState(false);
   const [audioBlocked, setAudioBlocked] = useState(false);
   const [roomName, setRoomName] = useState(DEFAULT_CHANNEL_ID);
+  const [programScene, setProgramScene] = useState<ProgramScene>(() => emptyProgramScene(DEFAULT_CHANNEL_ID));
 
   useEffect(() => {
     const handleFullscreenChange = () => setIsFullscreen(Boolean(document.fullscreenElement));
@@ -41,6 +48,10 @@ export default function WatchPage() {
     setRoomName(channelIDFromSearch(window.location.search));
   }, []);
 
+  useEffect(() => {
+    void getProgramScene(roomName).then(setProgramScene).catch(() => {});
+  }, [roomName]);
+
   async function watch() {
     setStatus("connecting");
     setMessage("กำลังเชื่อมต่อ…");
@@ -55,7 +66,11 @@ export default function WatchPage() {
       };
 
       const subscribeToProgram = (publication: RemoteTrackPublication) => {
-        if (publication.trackName === "program-video" || publication.trackName === "program-audio") {
+        if (
+          publication.trackName === "program-video" ||
+          publication.trackName === "compositor-preview-video" ||
+          publication.trackName === "program-audio"
+        ) {
           publication.setSubscribed(true);
         }
       };
@@ -64,10 +79,29 @@ export default function WatchPage() {
       room.on(RoomEvent.TrackSubscribed, attachProgramTrack);
       room.on(RoomEvent.TrackUnsubscribed, (track, publication) => {
         track.detach();
-        if (publication.trackName === "program-video") setHasProgramVideo(false);
+        if (directVideoTrack.current === track) directVideoTrack.current = null;
+        if (composedVideoTrack.current === track) {
+          composedVideoTrack.current = null;
+          composedVideoPublication.current = null;
+        }
+        if (publication.trackName !== "program-audio") selectViewerVideo();
+      });
+      room.on(RoomEvent.TrackMuted, (publication) => {
+        if (publication.trackName === "compositor-preview-video") selectViewerVideo();
+      });
+      room.on(RoomEvent.TrackUnmuted, (publication) => {
+        if (publication.trackName === "compositor-preview-video") selectViewerVideo();
       });
       room.on(RoomEvent.ParticipantConnected, refreshViewerCount);
       room.on(RoomEvent.ParticipantDisconnected, refreshViewerCount);
+      room.on(RoomEvent.DataReceived, (payload) => {
+        try {
+          const message = JSON.parse(new TextDecoder().decode(payload)) as { type?: string; scene?: ProgramScene };
+          if (message.type === "program-scene" && message.scene) setProgramScene(message.scene);
+        } catch {
+          // Ignore unrelated or malformed data packets.
+        }
+      });
       room.on(RoomEvent.Disconnected, () => {
         setStatus("idle");
         setViewerCount(0);
@@ -94,15 +128,23 @@ export default function WatchPage() {
     roomRef.current = null;
     audioElements.current.forEach((element) => element.remove());
     audioElements.current = [];
+    selectedVideoTrack.current = null;
+    directVideoTrack.current = null;
+    composedVideoTrack.current = null;
+    composedVideoPublication.current = null;
     setHasProgramVideo(false);
     setAudioBlocked(false);
     if (videoRef.current) videoRef.current.srcObject = null;
   }
 
   function attachProgramTrack(track: RemoteTrack, publication: RemoteTrackPublication) {
-    if (publication.trackName === "program-video" && track.kind === Track.Kind.Video && videoRef.current) {
-      track.attach(videoRef.current);
-      setHasProgramVideo(true);
+    if (track.kind === Track.Kind.Video) {
+      if (publication.trackName === "program-video") directVideoTrack.current = track;
+      if (publication.trackName === "compositor-preview-video") {
+        composedVideoTrack.current = track;
+        composedVideoPublication.current = publication;
+      }
+      selectViewerVideo();
     }
     if (publication.trackName === "program-audio" && track.kind === Track.Kind.Audio) {
       audioElements.current.forEach((element) => element.remove());
@@ -113,6 +155,19 @@ export default function WatchPage() {
       audioElements.current.push(element);
       void element.play().then(() => setAudioBlocked(false)).catch(() => setAudioBlocked(true));
     }
+  }
+
+  function selectViewerVideo() {
+    const composed = composedVideoTrack.current;
+    const composedReady = composed && !composedVideoPublication.current?.isMuted;
+    const next = directVideoTrack.current ?? (composedReady ? composed : null);
+
+    if (selectedVideoTrack.current !== next) {
+      selectedVideoTrack.current?.detach();
+      selectedVideoTrack.current = next;
+      if (next && videoRef.current) next.attach(videoRef.current);
+    }
+    setHasProgramVideo(Boolean(next));
   }
 
   async function enableAudio() {
@@ -211,6 +266,15 @@ export default function WatchPage() {
         <Card style={{ overflow: "hidden", border: "1px solid var(--border-strong)", boxShadow: "var(--shadow-lg)" }}>
           <div className={`viewer-frame ${isFallbackFullscreen ? "fallback-fullscreen" : ""}`} ref={viewerFrameRef} style={{ width: "100%", aspectRatio: "16/9", position: "relative", backgroundColor: "#000" }}>
             <video ref={videoRef} autoPlay playsInline style={{ width: "100%", height: "100%", objectFit: "contain" }} />
+            {receivingProgram && (
+              <SceneOverlay
+                layers={programScene.layers}
+                selectedID={null}
+                disabled
+                onSelect={() => {}}
+                onChange={() => {}}
+              />
+            )}
             
             {!receivingProgram && (
               <div className="video-placeholder" style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", background: "radial-gradient(circle at center, #1a1a1a 0, #0a0a0a 100%)" }}>

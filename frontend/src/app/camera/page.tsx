@@ -145,7 +145,27 @@ export default function CameraPage() {
 
   async function connectToRoom(roomInfo: BroadcastRoom) {
     const credentials = await getConnectionToken(identityRef.current, roomInfo.id, "broadcaster");
-    const room = new Room({ adaptiveStream: false, dynacast: true });
+    // A production source feeds the compositor with one stable mezzanine
+    // stream. Simulcast layer switches can change H.264 SPS/PPS mid-session,
+    // which is unsuitable for the continuous decoder/compositor input.
+    const sourceEncoding = {
+      ...VideoPresets.h1080.encoding,
+      maxBitrate: 6_000_000,
+      maxFramerate: 30,
+      priority: "high" as const,
+    };
+    const room = new Room({
+      adaptiveStream: false,
+      dynacast: false,
+      publishDefaults: {
+        simulcast: false,
+        videoSimulcastLayers: [],
+        videoCodec: "h264",
+        backupCodec: false,
+        videoEncoding: sourceEncoding,
+        degradationPreference: "maintain-resolution",
+      },
+    });
 
     room.on(RoomEvent.ConnectionStateChanged, (state: ConnectionState) => setConnectionState(state));
     room.on(RoomEvent.Disconnected, () => setConnectionState("Disconnected"));
@@ -184,16 +204,12 @@ export default function CameraPage() {
     await room.localParticipant.publishTrack(localVideoTrack, {
       name: "camera-video",
       source: Track.Source.Camera,
-      simulcast: true,
+      simulcast: false,
       videoCodec: "h264",
       backupCodec: false,
       degradationPreference: "maintain-resolution",
-      videoEncoding: {
-        ...VideoPresets.h1080.encoding,
-        maxBitrate: 6_000_000,
-        maxFramerate: 30,
-        priority: "high",
-      },
+      videoSimulcastLayers: [],
+      videoEncoding: sourceEncoding,
     });
     if (audioTrack) {
       await room.localParticipant.publishTrack(audioTrack.clone(), {
