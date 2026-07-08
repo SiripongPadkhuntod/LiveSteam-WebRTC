@@ -65,7 +65,7 @@ export default function StudioPage() {
   const [previewCameraId, setPreviewCameraId] = useState<string | null>(null);
   const previewVideo = useRef<HTMLVideoElement>(null);
   const [monitoredAudioSourceId, setMonitoredAudioSourceId] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<"video" | "audio">("video");
+
   const [programAudioEnabled, setProgramAudioEnabled] = useState(true);
   const [broadcastBusy, setBroadcastBusy] = useState(false);
   const [status, setStatus] = useState<"idle" | "connecting" | "ready" | "live" | "error">("idle");
@@ -200,7 +200,7 @@ export default function StudioPage() {
     if (!audioTrack) return;
     const element = audioTrack.attach() as HTMLAudioElement;
     element.autoplay = true;
-    element.volume = (audioMixSettingsRef.current[monitoredAudioSourceId]?.volume ?? 100) / 100;
+    element.volume = Math.min(1, Math.max(0, (audioMixSettingsRef.current[monitoredAudioSourceId]?.volume ?? 100) / 100));
     document.body.appendChild(element);
     previewAudioElement.current = element;
     return () => {
@@ -211,7 +211,7 @@ export default function StudioPage() {
 
   useEffect(() => {
     if (previewAudioElement.current && monitoredAudioSourceId) {
-      previewAudioElement.current.volume = (audioMixSettings[monitoredAudioSourceId]?.volume ?? 100) / 100;
+      previewAudioElement.current.volume = Math.min(1, Math.max(0, (audioMixSettings[monitoredAudioSourceId]?.volume ?? 100) / 100));
     }
   }, [audioMixSettings, monitoredAudioSourceId]);
 
@@ -644,8 +644,8 @@ export default function StudioPage() {
         </div>
       </section>
 
-      <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) 340px", gap: "24px", alignItems: "start" }}>
-        {/* Left Column - Monitors */}
+      <div style={{ display: "flex", flexDirection: "column", gap: "32px", alignItems: "stretch" }}>
+        {/* Top Section - Monitors */}
         <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
           
           <div style={{ display: "grid", gridTemplateColumns: "1fr auto 1fr", gap: "16px", alignItems: "center" }}>
@@ -736,111 +736,98 @@ export default function StudioPage() {
           </div>
 
           {isConnected && (
-            <Card>
-              <CardBody style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "20px 24px" }}>
-                <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
-                  <span className="text-sm" style={{ letterSpacing: "0.1em", fontWeight: 600 }}>PRE-BROADCAST CHECK</span>
-                  <strong style={{ fontSize: "15px" }}>{activeCameraId ? `กล้องเริ่มต้น: ${activeCameraId.split('-').pop()}` : "รอกล้องเชื่อมต่อ"}</strong>
-                  <span className="text-sm" style={{ color: "var(--text-tertiary)", marginTop: "4px" }}>Output Session: {programRoomID(roomName)}</span>
-                </div>
-                <Button 
-                  variant={programAudioEnabled ? "primary" : "secondary"} 
-                  onClick={toggleProgramAudio}
-                  style={{ gap: "8px" }}
-                >
-                  {programAudioEnabled ? <Volume2 size={16} /> : <VolumeX size={16} />}
-                  Program Audio: {programAudioEnabled ? "ON" : "OFF"}
-                </Button>
-              </CardBody>
-            </Card>
-          )}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "24px" }}>
+              <Card>
+                <CardBody style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "20px 24px", height: "100%" }}>
+                  <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                    <span className="text-sm" style={{ letterSpacing: "0.1em", fontWeight: 600 }}>PRE-BROADCAST CHECK</span>
+                    <strong style={{ fontSize: "15px" }}>{activeCameraId ? `กล้องเริ่มต้น: ${activeCameraId.split('-').pop()}` : "รอกล้องเชื่อมต่อ"}</strong>
+                    <span className="text-sm" style={{ color: "var(--text-tertiary)", marginTop: "4px" }}>Output Session: {programRoomID(roomName)}</span>
+                  </div>
+                  <Button 
+                    variant={programAudioEnabled ? "primary" : "secondary"} 
+                    onClick={toggleProgramAudio}
+                    style={{ gap: "8px" }}
+                  >
+                    {programAudioEnabled ? <Volume2 size={16} /> : <VolumeX size={16} />}
+                    Program Audio: {programAudioEnabled ? "ON" : "OFF"}
+                  </Button>
+                </CardBody>
+              </Card>
 
-          {isConnected && (
-            <Card>
-              <CardBody style={{ padding: "20px 24px" }}>
-                <SceneLayerPanel
-                  layers={scene.layers}
-                  selectedID={selectedSceneLayerID}
-                  disabled={isLive}
-                  onSelect={setSelectedSceneLayerID}
-                  onChange={updateSceneLayers}
-                />
-              </CardBody>
-            </Card>
+              <Card>
+                <CardBody style={{ padding: "20px 24px", height: "100%" }}>
+                  <SceneLayerPanel
+                    layers={scene.layers}
+                    selectedID={selectedSceneLayerID}
+                    disabled={isLive}
+                    onSelect={setSelectedSceneLayerID}
+                    onChange={updateSceneLayers}
+                  />
+                </CardBody>
+              </Card>
+            </div>
           )}
         </div>
 
-        {/* Right Column - Sources */}
+        {/* Bottom Section - Sources */}
         {isConnected && (
-          <Card style={{ height: "100%", minHeight: "500px", display: "flex", flexDirection: "column" }}>
-            <div style={{ display: "flex", borderBottom: "1px solid var(--border-subtle)" }}>
-              <button 
-                className={`studio-tabs-btn ${activeTab === "video" ? "active" : ""}`} 
-                onClick={() => setActiveTab("video")}
-                style={{ flex: 1, padding: "16px", background: activeTab === "video" ? "var(--bg-elevated)" : "transparent", border: "none", color: activeTab === "video" ? "var(--text-primary)" : "var(--text-secondary)", fontWeight: 600, borderBottom: activeTab === "video" ? "2px solid var(--brand-accent)" : "2px solid transparent", cursor: "pointer", transition: "all 0.2s" }}
-              >
-                <Video size={14} style={{ display: "inline", marginRight: "6px", verticalAlign: "-2px" }} />
-                Cameras <Badge variant="default" style={{ marginLeft: "4px", padding: "2px 6px", fontSize: "10px" }}>{cameras.length}</Badge>
-              </button>
-              <button 
-                className={`studio-tabs-btn ${activeTab === "audio" ? "active" : ""}`} 
-                onClick={() => setActiveTab("audio")}
-                style={{ flex: 1, padding: "16px", background: activeTab === "audio" ? "var(--bg-elevated)" : "transparent", border: "none", color: activeTab === "audio" ? "var(--text-primary)" : "var(--text-secondary)", fontWeight: 600, borderBottom: activeTab === "audio" ? "2px solid var(--brand-accent)" : "2px solid transparent", cursor: "pointer", transition: "all 0.2s" }}
-              >
-                <Mic size={14} style={{ display: "inline", marginRight: "6px", verticalAlign: "-2px" }} />
-                Audio <Badge variant="default" style={{ marginLeft: "4px", padding: "2px 6px", fontSize: "10px" }}>{audioSources.length}</Badge>
-              </button>
-            </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "24px", alignItems: "start" }}>
+            <Card style={{ display: "flex", flexDirection: "column", maxHeight: "600px" }}>
+              <div style={{ padding: "16px 20px", borderBottom: "1px solid var(--border-subtle)", fontWeight: 600, display: "flex", alignItems: "center", gap: "8px" }}>
+                <Video size={18} style={{ color: "var(--text-secondary)" }} />
+                Cameras <Badge variant="default" style={{ marginLeft: "4px", padding: "2px 6px", fontSize: "12px" }}>{cameras.length}</Badge>
+              </div>
+              <div style={{ padding: "20px", display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: "16px", overflowY: "auto" }}>
+                {cameras.length === 0 ? (
+                  <div style={{ gridColumn: "1 / -1", padding: "40px 20px", textAlign: "center", border: "1px dashed var(--border-strong)", borderRadius: "var(--radius-md)", color: "var(--text-tertiary)" }}>
+                    <Video size={32} style={{ margin: "0 auto 12px", opacity: 0.5 }} />
+                    <p className="text-sm">ยังไม่มีกล้องในห้อง<br />เปิด <b>/camera</b> แล้วกรอก Code <b>{roomCode}</b></p>
+                  </div>
+                ) : (
+                  cameras.map((camera) => (
+                    <CameraPreviewCard 
+                      key={camera.id} 
+                      camera={camera} 
+                      isPreview={previewCameraId === camera.id}
+                      isActive={activeCameraId === camera.id} 
+                      isLive={isLive} 
+                      onTake={() => selectCamera(camera.id)}
+                      onKick={() => disconnectSource(camera.id)}
+                    />
+                  ))
+                )}
+              </div>
+            </Card>
 
-            <div style={{ padding: "20px", flex: 1, overflowY: "auto" }}>
-              {activeTab === "video" && (
-                <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
-                  {cameras.length === 0 ? (
-                    <div style={{ padding: "40px 20px", textAlign: "center", border: "1px dashed var(--border-strong)", borderRadius: "var(--radius-md)", color: "var(--text-tertiary)" }}>
-                      <Video size={32} style={{ margin: "0 auto 12px", opacity: 0.5 }} />
-                      <p className="text-sm">ยังไม่มีกล้องในห้อง<br />เปิด <b>/camera</b> แล้วกรอก Code <b>{roomCode}</b></p>
-                    </div>
-                  ) : (
-                    cameras.map((camera) => (
-                      <CameraPreviewCard 
-                        key={camera.id} 
-                        camera={camera} 
-                        isPreview={previewCameraId === camera.id}
-                        isActive={activeCameraId === camera.id} 
-                        isLive={isLive} 
-                        onTake={() => selectCamera(camera.id)}
-                        onKick={() => disconnectSource(camera.id)}
-                      />
-                    ))
-                  )}
-                </div>
-              )}
-
-              {activeTab === "audio" && (
-                <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
-                  {audioSources.length === 0 ? (
-                    <div style={{ padding: "40px 20px", textAlign: "center", border: "1px dashed var(--border-strong)", borderRadius: "var(--radius-md)", color: "var(--text-tertiary)" }}>
-                      <Mic size={32} style={{ margin: "0 auto 12px", opacity: 0.5 }} />
-                      <p className="text-sm">ยังไม่มีแหล่งเสียง<br />เชื่อมกล้องหรือเปิด <b>/microphone</b></p>
-                    </div>
-                  ) : (
-                    audioSources.map((source) => (
-                      <AudioSourceRow
-                        key={source.id}
-                        source={source}
-                        setting={audioMixSettings[source.id] ?? { enabled: false, volume: 100 }}
-                        isMonitoring={monitoredAudioSourceId === source.id}
-                        onToggleEnabled={() => updateAudioMix(source.id, { enabled: !(audioMixSettings[source.id]?.enabled ?? false) })}
-                        onVolume={(volume) => updateAudioMix(source.id, { volume })}
-                        onMonitor={() => setMonitoredAudioSourceId((current) => current === source.id ? null : source.id)}
-                        onRemove={() => disconnectSource(source.id)}
-                      />
-                    ))
-                  )}
-                </div>
-              )}
-            </div>
-          </Card>
+            <Card style={{ display: "flex", flexDirection: "column", maxHeight: "600px" }}>
+              <div style={{ padding: "16px 20px", borderBottom: "1px solid var(--border-subtle)", fontWeight: 600, display: "flex", alignItems: "center", gap: "8px" }}>
+                <Mic size={18} style={{ color: "var(--text-secondary)" }} />
+                Audio <Badge variant="default" style={{ marginLeft: "4px", padding: "2px 6px", fontSize: "12px" }}>{audioSources.length}</Badge>
+              </div>
+              <div style={{ padding: "20px", display: "flex", flexDirection: "column", gap: "16px", overflowY: "auto" }}>
+                {audioSources.length === 0 ? (
+                  <div style={{ padding: "40px 20px", textAlign: "center", border: "1px dashed var(--border-strong)", borderRadius: "var(--radius-md)", color: "var(--text-tertiary)" }}>
+                    <Mic size={32} style={{ margin: "0 auto 12px", opacity: 0.5 }} />
+                    <p className="text-sm">ยังไม่มีแหล่งเสียง<br />เชื่อมกล้องหรือเปิด <b>/microphone</b></p>
+                  </div>
+                ) : (
+                  audioSources.map((source) => (
+                    <AudioSourceRow
+                      key={source.id}
+                      source={source}
+                      setting={audioMixSettings[source.id] ?? { enabled: false, volume: 100 }}
+                      isMonitoring={monitoredAudioSourceId === source.id}
+                      onToggleEnabled={() => updateAudioMix(source.id, { enabled: !(audioMixSettings[source.id]?.enabled ?? false) })}
+                      onVolume={(volume) => updateAudioMix(source.id, { volume })}
+                      onMonitor={() => setMonitoredAudioSourceId((current) => current === source.id ? null : source.id)}
+                      onRemove={() => disconnectSource(source.id)}
+                    />
+                  ))
+                )}
+              </div>
+            </Card>
+          </div>
         )}
       </div>
 
@@ -889,7 +876,16 @@ function CameraPreviewCard({ camera, isPreview, isActive, isLive, onTake, onKick
     }, [camera.videoTrack]);
 
     return (
-      <Card style={{ overflow: "hidden", borderColor: isActive ? "var(--brand-accent)" : (isPreview ? "var(--primary)" : "var(--border-subtle)"), boxShadow: isActive ? "0 0 0 1px var(--brand-accent)" : "none", transition: "all 0.2s ease" }}>
+      <Card 
+        onClick={() => !isPreview && onTake()}
+        style={{ 
+          overflow: "hidden", 
+          borderColor: isActive ? "var(--brand-accent)" : (isPreview ? "var(--primary)" : "var(--border-subtle)"), 
+          boxShadow: isActive ? "0 0 0 1px var(--brand-accent)" : "none", 
+          transition: "all 0.2s ease",
+          cursor: isPreview ? "default" : "pointer"
+        }}
+      >
         <div style={{ position: "relative", aspectRatio: "16/9", background: "#000" }}>
           <video ref={videoRef} autoPlay playsInline muted style={{ width: "100%", height: "100%", objectFit: "cover" }} />
           {!camera.videoTrack && <div style={{ position: "absolute", inset: 0, display: "grid", placeContent: "center", color: "var(--text-tertiary)", fontSize: "12px", fontWeight: 600 }}>NO SIGNAL</div>}
@@ -910,23 +906,17 @@ function CameraPreviewCard({ camera, isPreview, isActive, isLive, onTake, onKick
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <div style={{ display: "flex", flexDirection: "column" }}>
               <span style={{ fontSize: "13px", fontWeight: 600 }}>{camera.label}</span>
-              <span className="text-sm" style={{ fontSize: "11px" }}>{camera.id.split('-').pop()}</span>
+              <span className="text-sm" style={{ fontSize: "11px", color: "var(--text-secondary)" }}>{camera.id.split('-').pop()}</span>
             </div>
             {onKick && (
-              <button onClick={onKick} style={{ background: "transparent", border: "none", color: "var(--text-tertiary)", cursor: "pointer", padding: "4px" }}>
-                <X size={14} />
+              <button 
+                onClick={(e) => { e.stopPropagation(); onKick(); }} 
+                style={{ background: "transparent", border: "none", color: "var(--text-tertiary)", cursor: "pointer", padding: "4px", borderRadius: "4px", display: "flex" }}
+              >
+                <X size={16} />
               </button>
             )}
           </div>
-          <Button 
-            variant={isPreview ? "secondary" : "primary"} 
-            size="sm" 
-            disabled={isPreview} 
-            onClick={onTake}
-            style={{ width: "100%" }}
-          >
-            {isPreview ? "กำลังพรีวิว" : `ส่งไป Preview`}
-          </Button>
         </div>
       </Card>
     );
@@ -973,11 +963,127 @@ function AudioSourceRow({ source, setting, isMonitoring, onToggleEnabled, onVolu
           onChange={(event) => onVolume(Number(event.target.value))} 
           style={{ width: "100%", accentColor: setting.enabled ? "var(--success)" : "var(--brand-accent)", cursor: "pointer" }}
         />
+        <div style={{ marginTop: "4px" }}>
+          <AudioVisualizer track={source.track} enabled={setting.enabled} />
+        </div>
       </div>
 
       <Button variant={isMonitoring ? "primary" : "secondary"} size="sm" onClick={onMonitor} style={{ width: "100%" }}>
         {isMonitoring ? "หยุดฟัง" : "ฟังเสียง"}
       </Button>
     </Card>
+  );
+}
+
+function AudioVisualizer({ track, enabled }: { track: Track, enabled: boolean }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  
+  useEffect(() => {
+    if (!track || !track.mediaStreamTrack) return;
+    if (track.mediaStreamTrack.kind !== 'audio') {
+      console.warn("AudioVisualizer: track is not an audio track", track.mediaStreamTrack.kind);
+      return;
+    }
+
+    // Force WebRTC to decode the stream by attaching it to a muted audio element.
+    // Without this, some browsers (like Chrome) may deliver silence to the Web Audio API.
+    const dummyElement = track.attach() as HTMLAudioElement;
+    dummyElement.muted = true;
+    dummyElement.volume = 0;
+    dummyElement.style.display = 'none';
+    document.body.appendChild(dummyElement);
+    dummyElement.play().catch(() => {});
+    
+    let audioCtx: AudioContext | null = null;
+    let source: MediaStreamAudioSourceNode | null = null;
+    let animationId: number;
+
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      audioCtx = new AudioContextClass();
+      
+      const analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 128;
+      analyser.smoothingTimeConstant = 0.8;
+      
+      const stream = new MediaStream([track.mediaStreamTrack]);
+      source = audioCtx.createMediaStreamSource(stream);
+      source.connect(analyser);
+      
+      const bufferLength = analyser.frequencyBinCount;
+      const dataArray = new Uint8Array(bufferLength);
+      
+      const draw = () => {
+        animationId = requestAnimationFrame(draw);
+        
+        if (!canvasRef.current) return;
+        const canvas = canvasRef.current;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+        
+        analyser.getByteFrequencyData(dataArray);
+        
+        let sum = 0;
+        for (let i = 0; i < bufferLength; i++) {
+          sum += dataArray[i];
+        }
+        const average = sum / bufferLength;
+        
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        
+        const numBlocks = 30;
+        const blockWidth = (canvas.width - (numBlocks - 1) * 2) / numBlocks;
+        
+        const activeBlocks = Math.floor((average / 255) * numBlocks * 1.8);
+        
+        for (let i = 0; i < numBlocks; i++) {
+          const x = i * (blockWidth + 2);
+          
+          if (i < activeBlocks) {
+            if (i > numBlocks * 0.8) {
+              ctx.fillStyle = '#ef4444'; // danger
+            } else if (i > numBlocks * 0.6) {
+              ctx.fillStyle = '#f59e0b'; // warning
+            } else {
+              ctx.fillStyle = enabled ? '#10b981' : '#a3a3a3'; // success or gray
+            }
+          } else {
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.05)';
+          }
+          
+          ctx.fillRect(x, 0, blockWidth, canvas.height);
+        }
+      };
+      
+      draw();
+    } catch (e) {
+      console.warn("AudioVisualizer initialization failed:", e);
+    }
+    
+    return () => {
+      cancelAnimationFrame(animationId);
+      if (source) {
+        try { source.disconnect(); } catch (e) {}
+      }
+      if (audioCtx && audioCtx.state !== 'closed') {
+        try { audioCtx.close().catch(() => {}); } catch (e) {}
+      }
+      try {
+        track.detach(dummyElement);
+        dummyElement.remove();
+      } catch (e) {}
+    };
+  }, [track, enabled]);
+
+  return (
+    <div style={{ background: "rgba(0,0,0,0.2)", padding: "6px", borderRadius: "4px" }}>
+      <canvas 
+        ref={canvasRef} 
+        width={300} 
+        height={8} 
+        style={{ width: "100%", height: "8px", display: "block" }} 
+      />
+    </div>
   );
 }
