@@ -1,3 +1,5 @@
+import type { ProgramScene } from "@/lib/scene";
+
 export type ParticipantRole = "broadcaster" | "monitor" | "viewer";
 export type MediaTarget = "source" | "d1";
 
@@ -60,6 +62,37 @@ export async function ensureProgramBridge(room: string) {
   const payload = await response.json();
   if (!response.ok) throw new Error(payload.error ?? "เริ่ม Program RTP Bridge ไม่สำเร็จ");
   return payload as { room: string; d1Room: string; identity: string; passthrough: boolean };
+}
+
+export async function getProgramScene(room: string) {
+  const response = await fetch(`/api/scenes/${encodeURIComponent(room)}`, { cache: "no-store" });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error ?? "โหลด Scene ไม่สำเร็จ");
+  return payload as ProgramScene;
+}
+
+export async function saveProgramScene(room: string, scene: ProgramScene) {
+  const response = await fetch(`/api/scenes/${encodeURIComponent(room)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(scene),
+  });
+  const payload = await response.json();
+  if (!response.ok) {
+    const error = new Error(payload.error ?? "บันทึก Scene ไม่สำเร็จ") as Error & { scene?: ProgramScene };
+    if (response.status === 409) error.scene = payload.scene as ProgramScene;
+    throw error;
+  }
+  return payload as ProgramScene;
+}
+
+export async function uploadSceneAsset(file: File) {
+  const form = new FormData();
+  form.set("file", file);
+  const response = await fetch("/api/assets", { method: "POST", body: form });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error ?? "อัปโหลด Asset ไม่สำเร็จ");
+  return payload as { id: string; url: string; contentType: string; size: number };
 }
 
 async function readRoomResponse(response: Response) {

@@ -21,6 +21,7 @@ export default function ChannelsPage() {
 
   useEffect(() => {
     void loadRooms();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const showToast = (message: string, type: "success" | "error" | "info" = "info") => {

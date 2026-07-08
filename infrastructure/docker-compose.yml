@@ -46,6 +46,7 @@ services:
     restart: unless-stopped
     environment:
       - REDIS_URL=redis:6379
+      - ASSET_DIR=/data/assets
       - LIVEKIT_API_KEY=devkey
       - LIVEKIT_API_SECRET=devsecret_devsecret_devsecret_12345
       - LIVEKIT_URL=${LIVEKIT_URL:-ws://127.0.0.1:7880}
@@ -56,6 +57,8 @@ services:
       - D1_LIVEKIT_INTERNAL_URL=ws://d1:7980
     ports:
       - "8080:8080"
+    volumes:
+      - asset-data:/data/assets
     depends_on:
       - redis
       - livekit
@@ -74,6 +77,29 @@ services:
     ports:
       - "3001:3001"
     depends_on:
+      - backend
+
+  compositor:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile.compositor
+    restart: unless-stopped
+    environment:
+      - REDIS_URL=redis:6379
+      - ASSET_DIR=/data/assets
+      - HTTP_ADDR=:8090
+      - LIVEKIT_INTERNAL_URL=ws://livekit:7880
+      - LIVEKIT_API_KEY=devkey
+      - LIVEKIT_API_SECRET=devsecret_devsecret_devsecret_12345
+      - D1_LIVEKIT_INTERNAL_URL=ws://d1:7980
+      - D1_LIVEKIT_API_KEY=d1key
+      - D1_LIVEKIT_API_SECRET=d1secret_d1secret_d1secret_12345
+    ports:
+      - "8090:8090"
+    volumes:
+      - asset-data:/data/assets:ro
+    depends_on:
+      - redis
       - backend
 
   caddy:
@@ -100,3 +126,4 @@ volumes:
   redis-d1-data:
   caddy-data:
   caddy-config:
+  asset-data:

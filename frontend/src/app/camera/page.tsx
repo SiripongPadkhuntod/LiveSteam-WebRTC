@@ -167,6 +167,7 @@ export default function CameraPage() {
     room.localParticipant.setTrackSubscriptionPermissions(false, [
       { participantIdentity: roomInfo.studioIdentity, allowAll: true },
       { participantIdentity: `bridge-${roomInfo.id}`, allowAll: true },
+      { participantIdentity: `compositor-${roomInfo.id}`, allowAll: true },
     ]);
 
     const videoTrack = localStream.current?.getVideoTracks()[0];

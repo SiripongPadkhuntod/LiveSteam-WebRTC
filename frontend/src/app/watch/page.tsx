@@ -7,8 +7,8 @@ import { getConnectionToken, participantID } from "@/lib/api";
 import { channelByID, channelIDFromSearch, DEFAULT_CHANNEL_ID, programRoomID } from "@/lib/channels";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Card, CardBody } from "@/components/ui/card";
-import { Users, Play, Square, Volume2, MonitorOff, UserX, Maximize, Minimize, Info } from "lucide-react";
+import { Card } from "@/components/ui/card";
+import { Users, Play, Square, Volume2, MonitorOff, UserX, Maximize, Minimize } from "lucide-react";
 export default function WatchPage() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const viewerFrameRef = useRef<HTMLDivElement>(null);

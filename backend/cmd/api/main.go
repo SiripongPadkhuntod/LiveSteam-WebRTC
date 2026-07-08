@@ -20,6 +20,8 @@ import (
 
 type config struct {
 	Addr               string
+	RedisURL           string
+	AssetDir           string
 	APIKey             string
 	APISecret          string
 	LiveKitURL         string
@@ -66,6 +68,12 @@ func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 	rooms := newRoomStore()
 	bridges := newBridgeManager(cfg, logger)
+	scenes := newSceneService(cfg.RedisURL, logger)
+	assets, err := newAssetService(cfg.AssetDir, logger)
+	if err != nil {
+		logger.Error("asset service failed to start", "error", err)
+		os.Exit(1)
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
@@ -73,6 +81,10 @@ func main() {
 	})
 	mux.HandleFunc("POST /api/token", tokenHandler(cfg))
 	mux.HandleFunc("POST /api/bridge", bridges.handleEnsure)
+	mux.HandleFunc("GET /api/scenes/{room}", scenes.handleGet)
+	mux.HandleFunc("PUT /api/scenes/{room}", scenes.handlePut)
+	mux.HandleFunc("POST /api/assets", assets.handleUpload)
+	mux.HandleFunc("GET /api/assets/{id}", assets.handleGet)
 	mux.HandleFunc("GET /api/rooms", rooms.handleGet)
 	mux.HandleFunc("POST /api/rooms", rooms.handleCreate)
 
@@ -189,6 +201,8 @@ func normalizeRoomCode(value string) string {
 func loadConfig() config {
 	return config{
 		Addr:               env("HTTP_ADDR", ":8080"),
+		RedisURL:           os.Getenv("REDIS_URL"),
+		AssetDir:           env("ASSET_DIR", "/data/assets"),
 		APIKey:             env("LIVEKIT_API_KEY", "devkey"),
 		APISecret:          env("LIVEKIT_API_SECRET", "devsecret_devsecret_devsecret_12345"),
 		LiveKitURL:         os.Getenv("LIVEKIT_URL"),
@@ -278,7 +292,7 @@ func withCORS(allowedOrigins []string, allowPrivate bool, next http.Handler) htt
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 		}
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS")
 		w.Header().Set("Vary", "Origin")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)

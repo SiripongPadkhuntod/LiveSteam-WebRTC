@@ -13,13 +13,14 @@ import {
   type RemoteTrackPublication,
   type RemoteParticipant,
 } from "livekit-client";
-import { ensureProgramBridge, getConnectionToken } from "@/lib/api";
+import { ensureProgramBridge, getConnectionToken, getProgramScene, saveProgramScene } from "@/lib/api";
 import { channelByID, channelIDFromSearch, DEFAULT_CHANNEL_ID, programRoomID } from "@/lib/channels";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardBody, CardHeader } from "@/components/ui/card";
-import { Toast } from "@/components/ui/toast";
-import { LayoutDashboard, RadioTower, Users, Video, Mic, Play, Square, Volume2, VolumeX, MonitorOff, UserX, CheckCircle2, X } from "lucide-react";
+import { SceneLayerPanel, SceneOverlay } from "@/components/studio/scene-editor";
+import { emptyProgramScene, type SceneImageLayer } from "@/lib/scene";
+import { RadioTower, Users, Video, Mic, Play, Square, Volume2, VolumeX, MonitorOff, UserX, CheckCircle2, X } from "lucide-react";
 
 type CameraSource = {
   id: string;
@@ -55,11 +56,14 @@ export default function StudioPage() {
   const audioMixerNodesRef = useRef(new Map<string, { source: MediaStreamAudioSourceNode; gain: GainNode }>());
   const audioSourcesRef = useRef<AudioSource[]>([]);
   const audioMixSettingsRef = useRef<Record<string, AudioMixSetting>>({});
+  const sceneDirtyRef = useRef(false);
 
   const [cameras, setCameras] = useState<CameraSource[]>([]);
   const [audioSources, setAudioSources] = useState<AudioSource[]>([]);
   const [audioMixSettings, setAudioMixSettings] = useState<Record<string, AudioMixSetting>>({});
   const [activeCameraId, setActiveCameraId] = useState<string | null>(null);
+  const [previewCameraId, setPreviewCameraId] = useState<string | null>(null);
+  const previewVideo = useRef<HTMLVideoElement>(null);
   const [monitoredAudioSourceId, setMonitoredAudioSourceId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"video" | "audio">("video");
   const [programAudioEnabled, setProgramAudioEnabled] = useState(true);
@@ -70,8 +74,12 @@ export default function StudioPage() {
   const [viewerCount, setViewerCount] = useState(0);
   const [roomName, setRoomName] = useState(DEFAULT_CHANNEL_ID);
   const [roomCode, setRoomCode] = useState("");
+  const [scene, setScene] = useState(() => emptyProgramScene(DEFAULT_CHANNEL_ID));
+  const [loadedSceneRoom, setLoadedSceneRoom] = useState<string | null>(null);
+  const [selectedSceneLayerID, setSelectedSceneLayerID] = useState<string | null>(null);
 
   const activeCameraIdRef = useRef<string | null>(null);
+  const previewCameraIdRef = useRef<string | null>(null);
   const statusRef = useRef(status);
   
   useEffect(() => {
@@ -80,8 +88,72 @@ export default function StudioPage() {
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+    setLoadedSceneRoom(null);
+    setSelectedSceneLayerID(null);
+    void getProgramScene(roomName).then((serverScene) => {
+      if (cancelled) return;
+      const legacyValue = window.localStorage.getItem(`localstream-scene:${roomName}`);
+      if (legacyValue && serverScene.layers.length === 0) {
+        try {
+          const legacyScene = JSON.parse(legacyValue) as typeof serverScene;
+          if (legacyScene.layers?.length) {
+            legacyScene.revision = Math.max(serverScene.revision + 1, legacyScene.revision);
+            setScene(legacyScene);
+            sceneDirtyRef.current = true;
+            setLoadedSceneRoom(roomName);
+            return;
+          }
+        } catch { /* ignore invalid legacy scene */ }
+      }
+      sceneDirtyRef.current = false;
+      setScene(serverScene);
+      setLoadedSceneRoom(roomName);
+    }).catch((error) => {
+      if (cancelled) return;
+      setScene(emptyProgramScene(roomName));
+      setMessage(error instanceof Error ? error.message : "โหลด Scene ไม่สำเร็จ");
+    });
+    return () => { cancelled = true; };
+  }, [roomName]);
+
+  useEffect(() => {
+    if (loadedSceneRoom !== roomName || !sceneDirtyRef.current) return;
+    const pendingScene = scene;
+    const timeout = window.setTimeout(() => {
+      void saveProgramScene(roomName, pendingScene).then((savedScene) => {
+        setScene((current) => {
+          if (current.revision !== pendingScene.revision) return current;
+          sceneDirtyRef.current = false;
+          window.localStorage.removeItem(`localstream-scene:${roomName}`);
+          return savedScene;
+        });
+      }).catch((error: Error & { scene?: typeof scene }) => {
+        if (error.scene) {
+          sceneDirtyRef.current = false;
+          setScene(error.scene);
+          setMessage("Scene ถูกแก้จากอีกเครื่อง · โหลด revision ล่าสุดแล้ว");
+          return;
+        }
+        setMessage(error.message || "บันทึก Scene ไม่สำเร็จ");
+      });
+    }, 500);
+    return () => window.clearTimeout(timeout);
+  }, [loadedSceneRoom, roomName, scene]);
+
+  useEffect(() => {
     activeCameraIdRef.current = activeCameraId;
   }, [activeCameraId]);
+
+  useEffect(() => {
+    previewCameraIdRef.current = previewCameraId;
+  }, [previewCameraId]);
+
+  useEffect(() => {
+    if (!activeCameraId || loadedSceneRoom !== roomName || scene.sourceId === activeCameraId) return;
+    sceneDirtyRef.current = true;
+    setScene((current) => ({ ...current, sourceId: activeCameraId, revision: current.revision + 1 }));
+  }, [activeCameraId, loadedSceneRoom, roomName, scene.sourceId]);
 
   useEffect(() => {
     statusRef.current = status;
@@ -100,10 +172,21 @@ export default function StudioPage() {
       programMonitorVideoTrack.current?.attach(element);
       return;
     }
-    if (status === "ready") {
+    if (status === "ready" && activeCameraId) {
       cameras.find((camera) => camera.id === activeCameraId)?.videoTrack?.attach(element);
     }
   }, [activeCameraId, cameras, status]);
+
+  useEffect(() => {
+    const element = previewVideo.current;
+    if (!element) return;
+
+    cameras.forEach((camera) => camera.videoTrack?.detach(element));
+
+    if (previewCameraId) {
+      cameras.find((camera) => camera.id === previewCameraId)?.videoTrack?.attach(element);
+    }
+  }, [previewCameraId, cameras]);
 
   useEffect(() => {
     programAudioEnabledRef.current = programAudioEnabled;
@@ -117,6 +200,7 @@ export default function StudioPage() {
     if (!audioTrack) return;
     const element = audioTrack.attach() as HTMLAudioElement;
     element.autoplay = true;
+    element.volume = (audioMixSettingsRef.current[monitoredAudioSourceId]?.volume ?? 100) / 100;
     document.body.appendChild(element);
     previewAudioElement.current = element;
     return () => {
@@ -124,6 +208,12 @@ export default function StudioPage() {
       if (previewAudioElement.current === element) previewAudioElement.current = null;
     };
   }, [audioSources, monitoredAudioSourceId]);
+
+  useEffect(() => {
+    if (previewAudioElement.current && monitoredAudioSourceId) {
+      previewAudioElement.current.volume = (audioMixSettings[monitoredAudioSourceId]?.volume ?? 100) / 100;
+    }
+  }, [audioMixSettings, monitoredAudioSourceId]);
 
   useEffect(() => () => {
     outputPublisherRoom.current?.disconnect();
@@ -202,13 +292,15 @@ export default function StudioPage() {
                 const firstReadyCamera = cams.find(c => c.videoTrack);
                 if (firstReadyCamera) {
                   setActiveCameraId(firstReadyCamera.id);
-                  setInputVideoQuality(cams, firstReadyCamera.id);
+                  setPreviewCameraId(firstReadyCamera.id);
+                  setInputVideoQuality(cams, firstReadyCamera.id, firstReadyCamera.id);
                 }
             } else {
-              setInputVideoQuality(cams, activeCameraIdRef.current);
+              setInputVideoQuality(cams, activeCameraIdRef.current, previewCameraIdRef.current);
             }
          } else {
             setActiveCameraId(null);
+            setPreviewCameraId(null);
          }
       };
 
@@ -275,24 +367,33 @@ export default function StudioPage() {
     camera.videoPublication?.setVideoQuality(VideoQuality.HIGH);
     await sendBridgeControl("program-switch", id);
     setActiveCameraId(id);
-    setInputVideoQuality(sources, id);
+    setInputVideoQuality(sources, id, previewCameraId);
     setMessage(`เปลี่ยน Program เป็น ${id} แล้ว · RTP passthrough`);
   }
 
   function selectCamera(id: string) {
-    if (status === "live") {
-      void switchCamera(id);
-      return;
-    }
-    setActiveCameraId(id);
-    setInputVideoQuality(cameras, id);
-    setMessage(`เลือก ${id} เป็นกล้องเริ่มต้นแล้ว · ยังไม่ได้ถ่ายทอดสด`);
+    setPreviewCameraId(id);
+    setInputVideoQuality(cameras, activeCameraId, id);
+    setMessage(`เลือกกล้อง ${id.split('-').pop()} เป็น Preview แล้ว`);
   }
 
-  function setInputVideoQuality(sources: CameraSource[], programCameraID: string) {
+  async function performCut() {
+    if (!previewCameraId || previewCameraId === activeCameraId) return;
+    const oldActive = activeCameraId;
+    if (status === "live") {
+      await switchCamera(previewCameraId);
+    } else {
+      setActiveCameraId(previewCameraId);
+      setInputVideoQuality(cameras, previewCameraId, oldActive);
+    }
+    if (oldActive) setPreviewCameraId(oldActive);
+  }
+
+  function setInputVideoQuality(sources: CameraSource[], programCameraID: string | null, previewCamID: string | null = null) {
     sources.forEach((source) => {
+      const isHigh = source.id === programCameraID || source.id === previewCamID;
       source.videoPublication?.setVideoQuality(
-        source.id === programCameraID ? VideoQuality.HIGH : VideoQuality.LOW,
+        isHigh ? VideoQuality.HIGH : VideoQuality.LOW,
       );
     });
   }
@@ -315,8 +416,10 @@ export default function StudioPage() {
       if (otherCam) {
         if (status === "live") await switchCamera(otherCam.id);
         else setActiveCameraId(otherCam.id);
+        setPreviewCameraId(otherCam.id);
       } else {
         setActiveCameraId(null);
+        setPreviewCameraId(null);
       }
     }
     setMessage(`นำ Source ${sourceId} ออกจากห้องแล้ว`);
@@ -480,6 +583,7 @@ export default function StudioPage() {
     setAudioMixSettings({});
     audioMixSettingsRef.current = {};
     setActiveCameraId(null);
+    setPreviewCameraId(null);
     setMonitoredAudioSourceId(null);
   }
 
@@ -503,8 +607,11 @@ export default function StudioPage() {
     }
   }
 
-  const selectedPreviewReady = status === "ready"
-    && cameras.some((camera) => camera.id === activeCameraId && camera.videoTrack);
+
+  function updateSceneLayers(layers: SceneImageLayer[]) {
+    sceneDirtyRef.current = true;
+    setScene((current) => ({ ...current, revision: current.revision + 1, layers }));
+  }
 
   return (
     <main className="shell studio-page" style={{ paddingBottom: 120 }}>
@@ -538,41 +645,95 @@ export default function StudioPage() {
       </section>
 
       <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) 340px", gap: "24px", alignItems: "start" }}>
-        {/* Left Column - Program Output */}
+        {/* Left Column - Monitors */}
         <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
-          <Card>
-            <CardHeader style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "16px 24px" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                <MonitorOff size={18} style={{ color: "var(--text-secondary)" }} />
-                <span style={{ fontWeight: 600 }}>Program Output</span>
-              </div>
-              <span className="text-sm">{isLive ? "ภาพ Return จาก D1 ที่ผู้ชมกำลังเห็น" : "Preview ก่อนออกอากาศ"}</span>
-            </CardHeader>
-            <CardBody style={{ padding: 0 }}>
-              <div className="program-frame" style={{ width: "100%", aspectRatio: "16/9", position: "relative", backgroundColor: "#000" }}>
-                <video ref={outputVideo} autoPlay playsInline muted style={{ width: "100%", height: "100%", objectFit: "contain" }} />
-                {!isLive && !selectedPreviewReady && (
-                  <div className="video-placeholder" style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", background: "radial-gradient(circle at center, #1a1a1a 0, #0a0a0a 100%)" }}>
-                    <MonitorOff size={32} style={{ color: "var(--text-tertiary)", marginBottom: "16px" }} />
-                    <span style={{ fontSize: "12px", letterSpacing: "0.15em", fontWeight: 600, color: "var(--text-secondary)" }}>PROGRAM OFF AIR</span>
-                    <p className="text-sm" style={{ marginTop: "8px" }}>
-                      {isConnected ? "เลือกกล้องและตรวจเสียง แล้วกดเริ่มถ่ายทอดสด" : "เข้าควบคุม Studio เพื่อดูสัญญาณกล้อง"}
-                    </p>
+          
+          <div style={{ display: "grid", gridTemplateColumns: "1fr auto 1fr", gap: "16px", alignItems: "center" }}>
+            {/* Preview Card */}
+            <Card style={{ alignSelf: "stretch" }}>
+              <CardHeader style={{ padding: "12px 16px" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                  <MonitorOff size={16} style={{ color: "var(--text-secondary)" }} />
+                  <span style={{ fontWeight: 600 }}>Preview</span>
+                </div>
+              </CardHeader>
+              <CardBody style={{ padding: 0 }}>
+                <div className="program-frame" style={{ width: "100%", aspectRatio: "16/9", position: "relative", backgroundColor: "#000" }}>
+                  <video ref={previewVideo} autoPlay playsInline muted style={{ width: "100%", height: "100%", objectFit: "contain" }} />
+                  {!isLive && (
+                    <SceneOverlay
+                      layers={scene.layers}
+                      selectedID={selectedSceneLayerID}
+                      disabled={!isConnected}
+                      onSelect={setSelectedSceneLayerID}
+                      onChange={updateSceneLayers}
+                    />
+                  )}
+                  {previewCameraId && (
+                    <Badge variant="success" showDot style={{ position: "absolute", top: "16px", left: "16px", background: "rgba(0,0,0,0.6)", backdropFilter: "blur(4px)" }}>
+                      PREVIEW · {previewCameraId.split('-').pop()}
+                    </Badge>
+                  )}
+                  {!isConnected && (
+                    <div className="video-placeholder" style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
+                      <span style={{ fontSize: "11px", letterSpacing: "0.15em", color: "var(--text-secondary)" }}>OFFLINE</span>
+                    </div>
+                  )}
+                </div>
+              </CardBody>
+            </Card>
+
+            {/* Transition Controls */}
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "8px", padding: "0 8px" }}>
+              <Button 
+                variant="primary" 
+                size="sm" 
+                disabled={!isConnected || !previewCameraId || previewCameraId === activeCameraId}
+                onClick={performCut}
+                style={{ minWidth: "60px", height: "40px" }}
+              >
+                Cut
+              </Button>
+            </div>
+
+            {/* Program Card */}
+            <Card style={{ alignSelf: "stretch" }}>
+              <CardHeader style={{ padding: "12px 16px" }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                    <RadioTower size={16} style={{ color: isLive ? "var(--danger)" : "var(--text-secondary)" }} />
+                    <span style={{ fontWeight: 600 }}>Program</span>
                   </div>
-                )}
-                {!isLive && selectedPreviewReady && activeCameraId && (
-                  <Badge variant="success" showDot style={{ position: "absolute", top: "16px", left: "16px", background: "rgba(0,0,0,0.6)", backdropFilter: "blur(4px)" }}>
-                    PREVIEW · {activeCameraId.split('-').pop()}
-                  </Badge>
-                )}
-                {isLive && activeCameraId && (
-                  <Badge variant="live" showDot style={{ position: "absolute", top: "16px", left: "16px", background: "rgba(0,0,0,0.6)", backdropFilter: "blur(4px)" }}>
-                    LIVE · {activeCameraId.split('-').pop()}
-                  </Badge>
-                )}
-              </div>
-            </CardBody>
-          </Card>
+                  {isLive && <Badge variant="live" showDot>LIVE</Badge>}
+                </div>
+              </CardHeader>
+              <CardBody style={{ padding: 0 }}>
+                <div className="program-frame" style={{ width: "100%", aspectRatio: "16/9", position: "relative", backgroundColor: "#000" }}>
+                  <video ref={outputVideo} autoPlay playsInline muted style={{ width: "100%", height: "100%", objectFit: "contain" }} />
+                  {isLive && activeCameraId && (
+                    <Badge variant="live" showDot style={{ position: "absolute", top: "16px", left: "16px", background: "rgba(0,0,0,0.6)", backdropFilter: "blur(4px)" }}>
+                      LIVE · {activeCameraId.split('-').pop()}
+                    </Badge>
+                  )}
+                  {isLive && (
+                    <Badge variant="default" style={{ position: "absolute", top: "16px", right: "16px", background: "rgba(0,0,0,0.6)", backdropFilter: "blur(4px)", fontSize: "10px", letterSpacing: "0.05em", color: "var(--text-secondary)" }}>
+                      D1 RETURN
+                    </Badge>
+                  )}
+                  {!isLive && activeCameraId && (
+                    <Badge variant="success" showDot style={{ position: "absolute", top: "16px", left: "16px", background: "rgba(0,0,0,0.6)", backdropFilter: "blur(4px)" }}>
+                      PROGRAM · {activeCameraId.split('-').pop()}
+                    </Badge>
+                  )}
+                  {!isLive && !activeCameraId && (
+                    <div className="video-placeholder" style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", background: "radial-gradient(circle at center, #1a1a1a 0, #0a0a0a 100%)" }}>
+                      <span style={{ fontSize: "11px", letterSpacing: "0.15em", color: "var(--text-secondary)" }}>PROGRAM OFF AIR</span>
+                    </div>
+                  )}
+                </div>
+              </CardBody>
+            </Card>
+          </div>
 
           {isConnected && (
             <Card>
@@ -590,6 +751,20 @@ export default function StudioPage() {
                   {programAudioEnabled ? <Volume2 size={16} /> : <VolumeX size={16} />}
                   Program Audio: {programAudioEnabled ? "ON" : "OFF"}
                 </Button>
+              </CardBody>
+            </Card>
+          )}
+
+          {isConnected && (
+            <Card>
+              <CardBody style={{ padding: "20px 24px" }}>
+                <SceneLayerPanel
+                  layers={scene.layers}
+                  selectedID={selectedSceneLayerID}
+                  disabled={isLive}
+                  onSelect={setSelectedSceneLayerID}
+                  onChange={updateSceneLayers}
+                />
               </CardBody>
             </Card>
           )}
@@ -630,6 +805,7 @@ export default function StudioPage() {
                       <CameraPreviewCard 
                         key={camera.id} 
                         camera={camera} 
+                        isPreview={previewCameraId === camera.id}
                         isActive={activeCameraId === camera.id} 
                         isLive={isLive} 
                         onTake={() => selectCamera(camera.id)}
@@ -704,7 +880,7 @@ export default function StudioPage() {
   );
 }
 
-function CameraPreviewCard({ camera, isActive, isLive, onTake, onKick }: { camera: CameraSource, isActive: boolean, isLive: boolean, onTake: () => void, onKick?: () => void }) {
+function CameraPreviewCard({ camera, isPreview, isActive, isLive, onTake, onKick }: { camera: CameraSource, isPreview: boolean, isActive: boolean, isLive: boolean, onTake: () => void, onKick?: () => void }) {
     const videoRef = useRef<HTMLVideoElement>(null);
     useEffect(() => {
         if (camera.videoTrack && videoRef.current) {
@@ -713,15 +889,22 @@ function CameraPreviewCard({ camera, isActive, isLive, onTake, onKick }: { camer
     }, [camera.videoTrack]);
 
     return (
-      <Card style={{ overflow: "hidden", borderColor: isActive ? "var(--brand-accent)" : "var(--border-subtle)", boxShadow: isActive ? "0 0 0 1px var(--brand-accent)" : "none", transition: "all 0.2s ease" }}>
+      <Card style={{ overflow: "hidden", borderColor: isActive ? "var(--brand-accent)" : (isPreview ? "var(--primary)" : "var(--border-subtle)"), boxShadow: isActive ? "0 0 0 1px var(--brand-accent)" : "none", transition: "all 0.2s ease" }}>
         <div style={{ position: "relative", aspectRatio: "16/9", background: "#000" }}>
           <video ref={videoRef} autoPlay playsInline muted style={{ width: "100%", height: "100%", objectFit: "cover" }} />
           {!camera.videoTrack && <div style={{ position: "absolute", inset: 0, display: "grid", placeContent: "center", color: "var(--text-tertiary)", fontSize: "12px", fontWeight: 600 }}>NO SIGNAL</div>}
-          {isActive && (
-            <Badge variant={isLive ? "live" : "success"} showDot style={{ position: "absolute", top: "8px", right: "8px" }}>
-              {isLive ? "PROGRAM" : "SELECTED"}
-            </Badge>
-          )}
+          <div style={{ position: "absolute", top: "8px", right: "8px", display: "flex", gap: "4px" }}>
+            {isPreview && (
+              <Badge variant="default" showDot>
+                PREVIEW
+              </Badge>
+            )}
+            {isActive && (
+              <Badge variant={isLive ? "live" : "success"} showDot>
+                PROGRAM
+              </Badge>
+            )}
+          </div>
         </div>
         <div style={{ padding: "12px", display: "flex", flexDirection: "column", gap: "12px", background: "var(--bg-surface)" }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -736,13 +919,13 @@ function CameraPreviewCard({ camera, isActive, isLive, onTake, onKick }: { camer
             )}
           </div>
           <Button 
-            variant={isActive ? (isLive ? "danger" : "primary") : "secondary"} 
+            variant={isPreview ? "secondary" : "primary"} 
             size="sm" 
-            disabled={isActive} 
+            disabled={isPreview} 
             onClick={onTake}
             style={{ width: "100%" }}
           >
-            {isActive ? (isLive ? "กำลังออกอากาศ" : "กล้องเริ่มต้น") : `เลือก ${camera.label}`}
+            {isPreview ? "กำลังพรีวิว" : `ส่งไป Preview`}
           </Button>
         </div>
       </Card>
