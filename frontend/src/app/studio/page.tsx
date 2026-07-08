@@ -46,6 +46,7 @@ export default function StudioPage() {
   const outputVideo = useRef<HTMLVideoElement>(null);
   const publisherRoom = useRef<Room | null>(null);
   const outputPublisherRoom = useRef<Room | null>(null);
+  const programMonitorVideoTrack = useRef<RemoteTrack | null>(null);
   const programAudioTrack = useRef<LocalAudioTrack | null>(null);
   const previewAudioElement = useRef<HTMLAudioElement | null>(null);
   const programAudioEnabledRef = useRef(true);
@@ -71,6 +72,7 @@ export default function StudioPage() {
   const [roomCode, setRoomCode] = useState("");
 
   const activeCameraIdRef = useRef<string | null>(null);
+  const statusRef = useRef(status);
   
   useEffect(() => {
     setRoomName(channelIDFromSearch(window.location.search));
@@ -80,6 +82,28 @@ export default function StudioPage() {
   useEffect(() => {
     activeCameraIdRef.current = activeCameraId;
   }, [activeCameraId]);
+
+  useEffect(() => {
+    statusRef.current = status;
+  }, [status]);
+
+  // Before going live, Program Output is a local confidence preview of the
+  // selected source. While live, the same element shows D1's return feed.
+  useEffect(() => {
+    const element = outputVideo.current;
+    if (!element) return;
+
+    cameras.forEach((camera) => camera.videoTrack?.detach(element));
+    programMonitorVideoTrack.current?.detach(element);
+
+    if (status === "live") {
+      programMonitorVideoTrack.current?.attach(element);
+      return;
+    }
+    if (status === "ready") {
+      cameras.find((camera) => camera.id === activeCameraId)?.videoTrack?.attach(element);
+    }
+  }, [activeCameraId, cameras, status]);
 
   useEffect(() => {
     programAudioEnabledRef.current = programAudioEnabled;
@@ -225,7 +249,10 @@ export default function StudioPage() {
       };
       outRoom.on(RoomEvent.TrackPublished, subscribeToProgram);
       outRoom.on(RoomEvent.TrackSubscribed, attachProgramMonitorTrack);
-      outRoom.on(RoomEvent.TrackUnsubscribed, (track) => track.detach());
+      outRoom.on(RoomEvent.TrackUnsubscribed, (track) => {
+        track.detach();
+        if (programMonitorVideoTrack.current === track) programMonitorVideoTrack.current = null;
+      });
       await outRoom.connect(outputCredentials.url, outputCredentials.token, { autoSubscribe: false });
       outRoom.remoteParticipants.forEach((participant) => {
         participant.trackPublications.forEach(subscribeToProgram);
@@ -310,6 +337,7 @@ export default function StudioPage() {
       }
       await syncAudioMixer(audioSourcesRef.current, audioMixSettingsRef.current, true);
       await sendBridgeControl("program-start", activeCameraId);
+      statusRef.current = "live";
       setStatus("live");
       setMessage(`กำลังถ่ายทอดสดจาก ${activeCameraId} · H.264 RTP passthrough`);
     } catch (error) {
@@ -332,6 +360,7 @@ export default function StudioPage() {
       }
       await destroyAudioMixer();
       if (outputVideo.current) outputVideo.current.srcObject = null;
+      statusRef.current = "ready";
       setStatus("ready");
       setMessage("หยุดถ่ายทอดสดแล้ว · Studio และกล้องยังเชื่อมต่ออยู่");
     } finally {
@@ -440,6 +469,7 @@ export default function StudioPage() {
     void destroyAudioMixer();
     outputPublisherRoom.current = null;
     publisherRoom.current = null;
+    programMonitorVideoTrack.current = null;
     programAudioTrack.current = null;
     previewAudioElement.current = null;
     setViewerCount(0);
@@ -465,10 +495,16 @@ export default function StudioPage() {
   const isBusy = status === "connecting";
 
   function attachProgramMonitorTrack(track: RemoteTrack, publication: RemoteTrackPublication) {
-    if (publication.trackName === "program-video" && outputVideo.current) {
-      track.attach(outputVideo.current);
+    if (publication.trackName === "program-video") {
+      programMonitorVideoTrack.current = track;
+      if (statusRef.current === "live" && outputVideo.current) {
+        track.attach(outputVideo.current);
+      }
     }
   }
+
+  const selectedPreviewReady = status === "ready"
+    && cameras.some((camera) => camera.id === activeCameraId && camera.videoTrack);
 
   return (
     <main className="shell studio-page" style={{ paddingBottom: 120 }}>
@@ -510,12 +546,12 @@ export default function StudioPage() {
                 <MonitorOff size={18} style={{ color: "var(--text-secondary)" }} />
                 <span style={{ fontWeight: 600 }}>Program Output</span>
               </div>
-              <span className="text-sm">ภาพที่ผู้ชมกำลังเห็น</span>
+              <span className="text-sm">{isLive ? "ภาพ Return จาก D1 ที่ผู้ชมกำลังเห็น" : "Preview ก่อนออกอากาศ"}</span>
             </CardHeader>
             <CardBody style={{ padding: 0 }}>
               <div className="program-frame" style={{ width: "100%", aspectRatio: "16/9", position: "relative", backgroundColor: "#000" }}>
                 <video ref={outputVideo} autoPlay playsInline muted style={{ width: "100%", height: "100%", objectFit: "contain" }} />
-                {!isLive && (
+                {!isLive && !selectedPreviewReady && (
                   <div className="video-placeholder" style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", background: "radial-gradient(circle at center, #1a1a1a 0, #0a0a0a 100%)" }}>
                     <MonitorOff size={32} style={{ color: "var(--text-tertiary)", marginBottom: "16px" }} />
                     <span style={{ fontSize: "12px", letterSpacing: "0.15em", fontWeight: 600, color: "var(--text-secondary)" }}>PROGRAM OFF AIR</span>
@@ -523,6 +559,11 @@ export default function StudioPage() {
                       {isConnected ? "เลือกกล้องและตรวจเสียง แล้วกดเริ่มถ่ายทอดสด" : "เข้าควบคุม Studio เพื่อดูสัญญาณกล้อง"}
                     </p>
                   </div>
+                )}
+                {!isLive && selectedPreviewReady && activeCameraId && (
+                  <Badge variant="success" showDot style={{ position: "absolute", top: "16px", left: "16px", background: "rgba(0,0,0,0.6)", backdropFilter: "blur(4px)" }}>
+                    PREVIEW · {activeCameraId.split('-').pop()}
+                  </Badge>
                 )}
                 {isLive && activeCameraId && (
                   <Badge variant="live" showDot style={{ position: "absolute", top: "16px", left: "16px", background: "rgba(0,0,0,0.6)", backdropFilter: "blur(4px)" }}>

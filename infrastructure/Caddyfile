@@ -7,19 +7,37 @@
 # LAN HTTPS entry point for the Next.js application and its same-origin BFF.
 https://{$LAN_IP}:3443 {
 	tls internal
-	reverse_proxy frontend:3001
+	reverse_proxy {
+		dynamic a frontend 3001 {
+			refresh 2s
+			resolvers 127.0.0.11
+			versions ipv4
+		}
+	}
 }
 
 # WebRTC signaling uses WSS through Caddy. Media still travels directly to
 # LiveKit over UDP/TCP ports advertised by the LiveKit nodes.
 https://{$LAN_IP}:7443 {
 	tls internal
-	reverse_proxy livekit:7880
+	reverse_proxy {
+		dynamic a livekit 7880 {
+			refresh 2s
+			resolvers 127.0.0.11
+			versions ipv4
+		}
+	}
 }
 
 https://{$LAN_IP}:7444 {
 	tls internal
-	reverse_proxy d1:7980
+	reverse_proxy {
+		dynamic a d1 7980 {
+			refresh 2s
+			resolvers 127.0.0.11
+			versions ipv4
+		}
+	}
 }
 
 # The public CA certificate is safe to distribute. The CA private key remains
