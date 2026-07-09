@@ -1,10 +1,58 @@
 "use client";
 
 import { useRef, useState, type ChangeEvent, type DragEvent, type PointerEvent as ReactPointerEvent } from "react";
-import { Eye, EyeOff, GripVertical, ImagePlus, Layers3, Trash2 } from "lucide-react";
+import { Copy, Eye, EyeOff, GripVertical, ImagePlus, Layers3, Plus, Trash2, Video } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { uploadSceneAsset } from "@/lib/api";
 import type { SceneImageLayer } from "@/lib/scene";
+
+export type StudioSceneItem = {
+  key: string;
+  name: string;
+};
+
+export function SceneCollectionPanel({
+  scenes,
+  selectedKey,
+  programKey,
+  onSelect,
+  onAdd,
+  onDuplicate,
+  onDelete,
+}: {
+  scenes: StudioSceneItem[];
+  selectedKey: string;
+  programKey: string | null;
+  onSelect: (key: string) => void;
+  onAdd: () => void;
+  onDuplicate: (key: string) => void;
+  onDelete: (key: string) => void;
+}) {
+  return (
+    <div className="scene-collection-panel">
+      <div className="scene-layer-toolbar">
+        <div><Layers3 size={16} /><strong>Scenes</strong><span>{scenes.length}</span></div>
+        <Button variant="secondary" size="sm" onClick={onAdd}><Plus size={15} /> เพิ่ม Scene</Button>
+      </div>
+      <div className="scene-collection-list">
+        {scenes.map((scene) => (
+          <button
+            key={scene.key}
+            className={selectedKey === scene.key ? "selected" : ""}
+            onClick={() => onSelect(scene.key)}
+          >
+            <span>
+              <strong>{scene.name}</strong>
+              <small>{programKey === scene.key ? "PROGRAM" : selectedKey === scene.key ? "PREVIEW" : "SCENE"}</small>
+            </span>
+            <i role="button" aria-label="ทำสำเนา Scene" onClick={(event) => { event.stopPropagation(); onDuplicate(scene.key); }}><Copy size={14} /></i>
+            <i role="button" aria-label="ลบ Scene" onClick={(event) => { event.stopPropagation(); onDelete(scene.key); }}><Trash2 size={14} /></i>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 type DragState = {
   id: string;
@@ -99,14 +147,26 @@ export function SceneOverlay({
 
 export function SceneLayerPanel({
   layers,
+  cameraSources,
+  cameraSourceIDs,
+  selectedCameraID,
   selectedID,
   disabled,
+  onCameraAdd,
+  onCameraRemove,
+  onCameraSelect,
   onSelect,
   onChange,
 }: {
   layers: SceneImageLayer[];
+  cameraSources: Array<{ id: string; name: string }>;
+  cameraSourceIDs: string[];
+  selectedCameraID?: string;
   selectedID: string | null;
   disabled?: boolean;
+  onCameraAdd: (id: string) => void;
+  onCameraRemove: (id: string) => void;
+  onCameraSelect: (id: string | null) => void;
   onSelect: (id: string | null) => void;
   onChange: (layers: SceneImageLayer[]) => void;
 }) {
@@ -114,6 +174,8 @@ export function SceneLayerPanel({
   const [error, setError] = useState("");
   const [uploading, setUploading] = useState(false);
   const [draggingID, setDraggingID] = useState<string | null>(null);
+  const [showCameraPicker, setShowCameraPicker] = useState(false);
+  const addableCameras = cameraSources.filter((camera) => !cameraSourceIDs.includes(camera.id));
 
   async function addImage(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
@@ -173,19 +235,68 @@ export function SceneLayerPanel({
       <div className="scene-layer-toolbar">
         <div>
           <Layers3 size={16} />
-          <strong>Scene Layers</strong>
-          <span>{layers.length}</span>
+          <strong>Sources</strong>
+          <span>{layers.length + cameraSourceIDs.length}</span>
         </div>
-        <Button variant="secondary" size="sm" disabled={disabled || uploading} isLoading={uploading} onClick={() => fileInput.current?.click()}>
-          <ImagePlus size={15} /> {uploading ? "กำลังอัปโหลด" : "เพิ่มรูป"}
-        </Button>
+        <div className="scene-source-actions">
+          <Button
+            variant="secondary"
+            size="sm"
+            disabled={disabled || addableCameras.length === 0}
+            title={cameraSources.length === 0 ? "ยังไม่มีกล้องเชื่อมต่อใน Cameras" : addableCameras.length === 0 ? "เพิ่มกล้องที่เชื่อมต่อครบแล้ว" : "เพิ่มกล้องจาก Cameras"}
+            onClick={() => setShowCameraPicker((current) => !current)}
+          >
+            <Video size={15} /> Add Camera
+          </Button>
+          <Button variant="secondary" size="sm" disabled={disabled || uploading} isLoading={uploading} onClick={() => fileInput.current?.click()}>
+            <ImagePlus size={15} /> {uploading ? "กำลังอัปโหลด" : "เพิ่มรูป"}
+          </Button>
+        </div>
         <input ref={fileInput} type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden onChange={addImage} />
       </div>
+      {showCameraPicker && addableCameras.length > 0 && (
+        <div className="scene-camera-picker">
+          <small>CONNECTED CAMERAS</small>
+          {addableCameras.map((camera) => (
+            <button
+              key={camera.id}
+              onClick={() => {
+                onCameraAdd(camera.id);
+                onSelect(null);
+                setShowCameraPicker(false);
+              }}
+            >
+              <Video size={15} />
+              <span><strong>{camera.name}</strong><small>{camera.id}</small></span>
+            </button>
+          ))}
+        </div>
+      )}
       {error && <p className="scene-layer-error">{error}</p>}
-      {layers.length === 0 ? (
-        <p className="scene-layer-empty">ยังไม่มี Graphic Layer · เพิ่ม Logo หรือ PNG เพื่อวางซ้อนบน Program Preview</p>
+      {cameraSourceIDs.length === 0 && layers.length === 0 ? (
+        <p className="scene-layer-empty">ยังไม่มี Source · เชื่อมกล้องให้แสดงใน Cameras แล้วกด Add Camera หรือเพิ่ม Graphic</p>
       ) : (
         <div className="scene-layer-list">
+          {cameraSourceIDs.map((cameraID) => {
+            const camera = cameraSources.find((item) => item.id === cameraID);
+            const isSelected = cameraID === selectedCameraID;
+            return (
+              <button key={cameraID} className={`scene-camera-source ${isSelected ? "selected" : ""}`} onClick={() => { onCameraSelect(cameraID); onSelect(null); }}>
+                <span className="scene-layer-spacer" />
+                <span className="scene-camera-source-icon"><Video size={19} /></span>
+                <span>
+                  <strong>{camera?.name ?? cameraID}</strong>
+                  <small>CAMERA · {camera ? "CONNECTED" : "OFFLINE"}{isSelected ? " · PREVIEW" : ""}</small>
+                </span>
+                <i aria-label={isSelected ? "กล้องที่เลือก" : "เลือกกล้อง"}>{isSelected ? <Eye size={14} /> : <EyeOff size={14} />}</i>
+                <i
+                  role="button"
+                  aria-label="นำกล้องออกจาก Scene"
+                  onClick={(event) => { event.stopPropagation(); onCameraRemove(cameraID); }}
+                ><Trash2 size={14} /></i>
+              </button>
+            );
+          })}
           {[...layers].sort((a, b) => b.zIndex - a.zIndex).map((layer) => (
             <button
               key={layer.id}

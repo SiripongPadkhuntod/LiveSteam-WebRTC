@@ -13,12 +13,12 @@ import {
   type RemoteTrackPublication,
   type RemoteParticipant,
 } from "livekit-client";
-import { ensureProgramBridge, getConnectionToken, getProgramScene, saveProgramScene } from "@/lib/api";
+import { ensureProgramBridge, getConnectionToken, getProgramScene } from "@/lib/api";
 import { channelByID, channelIDFromSearch, DEFAULT_CHANNEL_ID, programRoomID } from "@/lib/channels";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardBody, CardHeader } from "@/components/ui/card";
-import { SceneLayerPanel, SceneOverlay } from "@/components/studio/scene-editor";
+import { SceneCollectionPanel, SceneLayerPanel, SceneOverlay, type StudioSceneItem } from "@/components/studio/scene-editor";
 import { emptyProgramScene, type ProgramScene, type SceneImageLayer } from "@/lib/scene";
 import { RadioTower, Users, Video, Mic, Play, Square, Volume2, VolumeX, MonitorOff, UserX, CheckCircle2, X } from "lucide-react";
 
@@ -42,6 +42,8 @@ type AudioMixSetting = {
   enabled: boolean;
   volume: number;
 };
+
+type StudioScene = StudioSceneItem & { scene: ProgramScene; cameraSourceIDs: string[] };
 
 export default function StudioPage() {
   const outputVideo = useRef<HTMLVideoElement>(null);
@@ -79,14 +81,20 @@ export default function StudioPage() {
   const [roomCode, setRoomCode] = useState("");
   const [scene, setScene] = useState(() => emptyProgramScene(DEFAULT_CHANNEL_ID));
   const [programScene, setProgramScene] = useState<ProgramScene>(() => emptyProgramScene(DEFAULT_CHANNEL_ID));
+  const [studioScenes, setStudioScenes] = useState<StudioScene[]>(() => [{ key: "scene-1", name: "Scene 1", scene: emptyProgramScene(DEFAULT_CHANNEL_ID), cameraSourceIDs: [] }]);
+  const [sceneCameraSourceIDs, setSceneCameraSourceIDs] = useState<string[]>([]);
+  const [selectedSceneKey, setSelectedSceneKey] = useState("scene-1");
+  const [programSceneKey, setProgramSceneKey] = useState<string | null>(null);
   const [previewSceneDirty, setPreviewSceneDirty] = useState(false);
   const [loadedSceneRoom, setLoadedSceneRoom] = useState<string | null>(null);
   const [selectedSceneLayerID, setSelectedSceneLayerID] = useState<string | null>(null);
 
   const activeCameraIdRef = useRef<string | null>(null);
   const previewCameraIdRef = useRef<string | null>(null);
+  const sceneSourceIdRef = useRef<string | undefined>(scene.sourceId);
   const programSceneRef = useRef(programScene);
   const statusRef = useRef(status);
+  const connectingRef = useRef(false);
   
   useEffect(() => {
     setRoomName(channelIDFromSearch(window.location.search));
@@ -105,8 +113,7 @@ export default function StudioPage() {
           const legacyScene = JSON.parse(legacyValue) as typeof serverScene;
           if (legacyScene.layers?.length) {
             legacyScene.revision = Math.max(serverScene.revision + 1, legacyScene.revision);
-            setScene(legacyScene);
-            setProgramScene(legacyScene);
+            initializeStudioScenes(legacyScene);
             sceneDirtyRef.current = true;
             setLoadedSceneRoom(roomName);
             return;
@@ -114,9 +121,7 @@ export default function StudioPage() {
         } catch { /* ignore invalid legacy scene */ }
       }
       sceneDirtyRef.current = false;
-      setScene(serverScene);
-      setProgramScene(serverScene);
-      setPreviewSceneDirty(false);
+      initializeStudioScenes(serverScene);
       setLoadedSceneRoom(roomName);
     }).catch((error) => {
       if (cancelled) return;
@@ -128,28 +133,9 @@ export default function StudioPage() {
   }, [roomName]);
 
   useEffect(() => {
-    if (loadedSceneRoom !== roomName || !sceneDirtyRef.current) return;
-    const pendingScene = scene;
-    const timeout = window.setTimeout(() => {
-      void saveProgramScene(roomName, pendingScene).then((savedScene) => {
-        setScene((current) => {
-          if (current.revision !== pendingScene.revision) return current;
-          sceneDirtyRef.current = false;
-          window.localStorage.removeItem(`localstream-scene:${roomName}`);
-          return savedScene;
-        });
-      }).catch((error: Error & { scene?: typeof scene }) => {
-        if (error.scene) {
-          sceneDirtyRef.current = false;
-          setScene(error.scene);
-          setMessage("Scene ถูกแก้จากอีกเครื่อง · โหลด revision ล่าสุดแล้ว");
-          return;
-        }
-        setMessage(error.message || "บันทึก Scene ไม่สำเร็จ");
-      });
-    }, 500);
-    return () => window.clearTimeout(timeout);
-  }, [loadedSceneRoom, roomName, scene]);
+    if (loadedSceneRoom !== roomName) return;
+    window.localStorage.setItem(`localstream-studio-scenes:${roomName}`, JSON.stringify(studioScenes));
+  }, [loadedSceneRoom, roomName, studioScenes]);
 
   useEffect(() => {
     activeCameraIdRef.current = activeCameraId;
@@ -164,10 +150,8 @@ export default function StudioPage() {
   }, [programScene]);
 
   useEffect(() => {
-    if (!activeCameraId || loadedSceneRoom !== roomName || scene.sourceId === activeCameraId) return;
-    sceneDirtyRef.current = true;
-    setScene((current) => ({ ...current, sourceId: activeCameraId, revision: current.revision + 1 }));
-  }, [activeCameraId, loadedSceneRoom, roomName, scene.sourceId]);
+    sceneSourceIdRef.current = scene.sourceId;
+  }, [scene.sourceId]);
 
   useEffect(() => {
     statusRef.current = status;
@@ -275,9 +259,12 @@ export default function StudioPage() {
   };
 
   async function connectStudio() {
+    if (connectingRef.current) return;
+    connectingRef.current = true;
     setStatus("connecting");
     setMessage("กำลังเชื่อมต่อ LiveKit…");
     try {
+      await disconnectAll();
       const studioIdentity = `studio-${roomName}`;
       
       // Connect to the Channel room
@@ -301,21 +288,11 @@ export default function StudioPage() {
            return next;
          });
          
-         if (cams.length > 0) {
-            if (!activeCameraIdRef.current || !cams.find(c => c.id === activeCameraIdRef.current)) {
-                const firstReadyCamera = cams.find(c => c.videoTrack);
-                if (firstReadyCamera) {
-                  setActiveCameraId(firstReadyCamera.id);
-                  setPreviewCameraId(firstReadyCamera.id);
-                  setInputVideoQuality(cams, firstReadyCamera.id, firstReadyCamera.id);
-                }
-            } else {
-              setInputVideoQuality(cams, activeCameraIdRef.current, previewCameraIdRef.current);
-            }
-         } else {
-            setActiveCameraId(null);
-            setPreviewCameraId(null);
-         }
+         const configuredCamera = cams.find((camera) => camera.id === sceneSourceIdRef.current && camera.videoTrack);
+         const activeCamera = cams.find((camera) => camera.id === activeCameraIdRef.current && camera.videoTrack);
+         setPreviewCameraId(configuredCamera?.id ?? null);
+         if (!activeCamera) setActiveCameraId(configuredCamera?.id ?? null);
+         setInputVideoQuality(cams, activeCamera?.id ?? configuredCamera?.id ?? null, configuredCamera?.id ?? null);
       };
 
       pubRoom.on(RoomEvent.ParticipantConnected, () => {
@@ -384,7 +361,10 @@ export default function StudioPage() {
     } catch (error) {
       await disconnectAll();
       setStatus("error");
-      setMessage(error instanceof Error ? error.message : "เชื่อมต่อไม่สำเร็จ");
+      const detail = error instanceof Error ? error.message : "เชื่อมต่อไม่สำเร็จ";
+      setMessage(detail.includes("Abort handler called") ? "การเชื่อมต่อ LiveKit ถูกยกเลิกกลางทาง · กรุณาลองกดเข้าควบคุม Studio ใหม่" : detail);
+    } finally {
+      connectingRef.current = false;
     }
   }
 
@@ -398,10 +378,57 @@ export default function StudioPage() {
     setMessage(`เปลี่ยน Program เป็น ${id} แล้ว · RTP passthrough`);
   }
 
-  function selectCamera(id: string) {
+  function selectCameraSource(id: string | null) {
+    if (id && !cameras.some((camera) => camera.id === id && camera.videoTrack)) {
+      setMessage("เพิ่มกล้องไม่ได้ เพราะกล้องไม่ได้เชื่อมต่ออยู่ใน Cameras");
+      return;
+    }
+    sceneDirtyRef.current = true;
+    setPreviewSceneDirty(true);
+    setSelectedSceneLayerID(null);
+    const nextScene = {
+      ...scene,
+      sourceId: id ?? undefined,
+      revision: scene.revision + 1,
+    };
+    commitSelectedStudioScene(nextScene);
     setPreviewCameraId(id);
     setInputVideoQuality(cameras, activeCameraId, id);
-    setMessage(`เลือกกล้อง ${id.split('-').pop()} เป็น Preview แล้ว`);
+    setMessage(id ? `เลือกกล้อง ${id.split('-').pop()} เป็น Preview แล้ว` : "ยังไม่ได้เลือกกล้องสำหรับ Preview");
+  }
+
+  function addCameraSource(id: string) {
+    if (!cameras.some((camera) => camera.id === id && camera.videoTrack)) {
+      setMessage("เพิ่มกล้องไม่ได้ เพราะกล้องไม่ได้เชื่อมต่ออยู่ใน Cameras");
+      return;
+    }
+    sceneDirtyRef.current = true;
+    setPreviewSceneDirty(true);
+    setSelectedSceneLayerID(null);
+    const nextCameraIDs = sceneCameraSourceIDs.includes(id) ? sceneCameraSourceIDs : [...sceneCameraSourceIDs, id];
+    const nextScene = { ...scene, sourceId: id, revision: scene.revision + 1 };
+    commitSelectedStudioScene(nextScene, nextCameraIDs);
+    setPreviewCameraId(id);
+    setInputVideoQuality(cameras, activeCameraId, id);
+    setMessage(`เพิ่มกล้อง ${id.split('-').pop()} เข้า Sources และเลือกเป็น Preview แล้ว`);
+  }
+
+  function removeCameraSource(id: string) {
+    sceneDirtyRef.current = true;
+    setPreviewSceneDirty(true);
+    const nextCameraIDs = sceneCameraSourceIDs.filter((cameraID) => cameraID !== id);
+    const isSelectedSource = scene.sourceId === id;
+    const nextScene = {
+      ...scene,
+      sourceId: isSelectedSource ? undefined : scene.sourceId,
+      revision: scene.revision + 1,
+    };
+    commitSelectedStudioScene(nextScene, nextCameraIDs);
+    if (isSelectedSource) {
+      setPreviewCameraId(null);
+      setInputVideoQuality(cameras, activeCameraId, null);
+      setMessage("นำกล้องออกจาก Sources แล้ว · ยังไม่ได้เลือกกล้องสำหรับ Preview");
+    }
   }
 
   async function performCut() {
@@ -414,10 +441,10 @@ export default function StudioPage() {
         setActiveCameraId(previewCameraId);
         setInputVideoQuality(cameras, previewCameraId, oldActive);
       }
-      if (oldActive) setPreviewCameraId(oldActive);
     }
     const nextProgramScene = { ...scene, sourceId: previewCameraId, layers: scene.layers.map((layer) => ({ ...layer })) };
     setProgramScene(nextProgramScene);
+    setProgramSceneKey(selectedSceneKey);
     await publishProgramSceneSnapshot(nextProgramScene);
     setPreviewSceneDirty(false);
   }
@@ -444,17 +471,9 @@ export default function StudioPage() {
   async function disconnectSource(sourceId: string) {
     if (!publisherRoom.current) return;
     if (activeCameraId === sourceId) {
-      // Pick another camera to be active first if possible
-      const otherCam = cameras.find(c => c.id !== sourceId);
-      if (otherCam) {
-        if (status === "live") await switchCamera(otherCam.id);
-        else setActiveCameraId(otherCam.id);
-        setPreviewCameraId(otherCam.id);
-      } else {
-        setActiveCameraId(null);
-        setPreviewCameraId(null);
-      }
+      setActiveCameraId(null);
     }
+    if (previewCameraId === sourceId) setPreviewCameraId(null);
     setMessage(`นำ Source ${sourceId} ออกจากห้องแล้ว`);
     const data = new TextEncoder().encode(JSON.stringify({ type: "disconnect-source" }));
     await publisherRoom.current.localParticipant.publishData(data, { reliable: true, destinationIdentities: [sourceId] });
@@ -474,6 +493,7 @@ export default function StudioPage() {
       await syncAudioMixer(audioSourcesRef.current, audioMixSettingsRef.current, true);
       const nextProgramScene = { ...scene, sourceId: activeCameraId, layers: scene.layers.map((layer) => ({ ...layer })) };
       setProgramScene(nextProgramScene);
+      setProgramSceneKey(selectedSceneKey);
       setPreviewSceneDirty(false);
       await sendBridgeControl("program-start", activeCameraId);
       await publishProgramSceneSnapshot(nextProgramScene);
@@ -628,6 +648,7 @@ export default function StudioPage() {
   }
 
   async function leaveStudio() {
+    connectingRef.current = false;
     await disconnectAll();
     setStatus("idle");
     setConnectionState("Disconnected");
@@ -662,10 +683,126 @@ export default function StudioPage() {
   }
 
 
+  function cloneProgramScene(value: ProgramScene): ProgramScene {
+    return {
+      ...value,
+      output: { ...value.output },
+      layers: value.layers.map((layer) => ({ ...layer })),
+    };
+  }
+
+  function commitSelectedStudioScene(nextScene: ProgramScene, nextCameraSourceIDs: string[] = sceneCameraSourceIDs) {
+    const sceneSnapshot = cloneProgramScene(nextScene);
+    const cameraSnapshot = [...nextCameraSourceIDs];
+    setScene(sceneSnapshot);
+    setSceneCameraSourceIDs(cameraSnapshot);
+    setStudioScenes((current) => current.map((item) => (
+      item.key === selectedSceneKey
+        ? { ...item, name: sceneSnapshot.name || item.name, scene: cloneProgramScene(sceneSnapshot), cameraSourceIDs: [...cameraSnapshot] }
+        : item
+    )));
+  }
+
   function updateSceneLayers(layers: SceneImageLayer[]) {
     sceneDirtyRef.current = true;
     setPreviewSceneDirty(true);
-    setScene((current) => ({ ...current, revision: current.revision + 1, layers }));
+    commitSelectedStudioScene({ ...scene, revision: scene.revision + 1, layers: layers.map((layer) => ({ ...layer })) });
+  }
+
+  function initializeStudioScenes(baseScene: ProgramScene) {
+    let items: StudioScene[] = [];
+    try {
+      const stored = window.localStorage.getItem(`localstream-studio-scenes:${roomName}`);
+      const parsed = stored ? JSON.parse(stored) as StudioScene[] : [];
+      if (Array.isArray(parsed)) {
+        items = parsed
+          .filter((item) => item?.key && item?.name && item?.scene?.output)
+          .map((item) => ({
+            ...item,
+            scene: cloneProgramScene(item.scene),
+            cameraSourceIDs: Array.isArray(item.cameraSourceIDs)
+              ? [...item.cameraSourceIDs]
+              : item.scene.sourceId ? [item.scene.sourceId] : [],
+          }));
+      }
+    } catch { /* ignore invalid local scene collection */ }
+    if (items.length === 0) items = [{ key: "scene-1", name: baseScene.name || "Scene 1", scene: cloneProgramScene(baseScene), cameraSourceIDs: baseScene.sourceId ? [baseScene.sourceId] : [] }];
+    setStudioScenes(items);
+    setSelectedSceneKey(items[0].key);
+    setProgramSceneKey(items[0].key);
+    setScene(cloneProgramScene(items[0].scene));
+    setSceneCameraSourceIDs([...items[0].cameraSourceIDs]);
+    setProgramScene(cloneProgramScene(items[0].scene));
+    setPreviewSceneDirty(false);
+  }
+
+  function selectStudioScene(key: string) {
+    const item = studioScenes.find((candidate) => candidate.key === key);
+    if (!item) return;
+    setSelectedSceneKey(key);
+    setScene(cloneProgramScene(item.scene));
+    setSceneCameraSourceIDs([...item.cameraSourceIDs]);
+    setSelectedSceneLayerID(null);
+    setPreviewSceneDirty(false);
+    sceneDirtyRef.current = false;
+    const connectedSource = cameras.some((camera) => camera.id === item.scene.sourceId && camera.videoTrack)
+      ? item.scene.sourceId ?? null
+      : null;
+    setPreviewCameraId(connectedSource);
+    setInputVideoQuality(cameras, activeCameraId, connectedSource);
+  }
+
+  function addStudioScene() {
+    const sequence = studioScenes.length + 1;
+    const key = `scene-${Date.now().toString(36)}`;
+    const nextScene = { ...emptyProgramScene(roomName), name: `Scene ${sequence}`, revision: scene.revision + 1 };
+    setStudioScenes((current) => [...current, { key, name: nextScene.name, scene: cloneProgramScene(nextScene), cameraSourceIDs: [] }]);
+    setSelectedSceneKey(key);
+    setScene(cloneProgramScene(nextScene));
+    setSceneCameraSourceIDs([]);
+    setPreviewCameraId(null);
+    setInputVideoQuality(cameras, activeCameraId, null);
+    setSelectedSceneLayerID(null);
+    setPreviewSceneDirty(true);
+  }
+
+  function duplicateStudioScene(key: string) {
+    const source = studioScenes.find((item) => item.key === key);
+    if (!source) return;
+    const duplicateKey = `scene-${Date.now().toString(36)}`;
+    const duplicateScene = {
+      ...source.scene,
+      name: `${source.name} Copy`,
+      revision: Math.max(scene.revision, source.scene.revision) + 1,
+      layers: source.scene.layers.map((layer) => ({ ...layer })),
+    };
+    setStudioScenes((current) => [...current, { key: duplicateKey, name: duplicateScene.name, scene: cloneProgramScene(duplicateScene), cameraSourceIDs: [...source.cameraSourceIDs] }]);
+    setSelectedSceneKey(duplicateKey);
+    setScene(cloneProgramScene(duplicateScene));
+    setSceneCameraSourceIDs([...source.cameraSourceIDs]);
+    const connectedSource = cameras.some((camera) => camera.id === duplicateScene.sourceId && camera.videoTrack)
+      ? duplicateScene.sourceId ?? null
+      : null;
+    setPreviewCameraId(connectedSource);
+    setInputVideoQuality(cameras, activeCameraId, connectedSource);
+    setPreviewSceneDirty(true);
+  }
+
+  function deleteStudioScene(key: string) {
+    if (studioScenes.length <= 1) return;
+    const remaining = studioScenes.filter((item) => item.key !== key);
+    setStudioScenes(remaining);
+    if (selectedSceneKey === key) {
+      setSelectedSceneKey(remaining[0].key);
+      setScene(cloneProgramScene(remaining[0].scene));
+      setSceneCameraSourceIDs([...remaining[0].cameraSourceIDs]);
+      const connectedSource = cameras.some((camera) => camera.id === remaining[0].scene.sourceId && camera.videoTrack)
+        ? remaining[0].scene.sourceId ?? null
+        : null;
+      setPreviewCameraId(connectedSource);
+      setInputVideoQuality(cameras, activeCameraId, connectedSource);
+      setSelectedSceneLayerID(null);
+    }
   }
 
   async function publishProgramSceneSnapshot(
@@ -773,7 +910,7 @@ export default function StudioPage() {
               <Button 
                 variant="primary" 
                 size="sm" 
-                disabled={!isConnected || !previewCameraId || (previewCameraId === activeCameraId && !previewSceneDirty)}
+                disabled={!isConnected || !previewCameraId || (previewCameraId === activeCameraId && !previewSceneDirty && selectedSceneKey === programSceneKey)}
                 onClick={performCut}
                 style={{ minWidth: "60px", height: "40px" }}
               >
@@ -830,13 +967,30 @@ export default function StudioPage() {
           {isConnected && (
             <Card>
               <CardBody style={{ padding: "20px 24px", height: "100%" }}>
-                <SceneLayerPanel
-                  layers={scene.layers}
-                  selectedID={selectedSceneLayerID}
-                  disabled={false}
-                  onSelect={setSelectedSceneLayerID}
-                  onChange={updateSceneLayers}
-                />
+                <div style={{ display: "grid", gridTemplateColumns: "minmax(220px, .7fr) minmax(360px, 1.3fr)", gap: "24px", alignItems: "start" }}>
+                  <SceneCollectionPanel
+                    scenes={studioScenes.map(({ key, name }) => ({ key, name }))}
+                    selectedKey={selectedSceneKey}
+                    programKey={programSceneKey}
+                    onSelect={selectStudioScene}
+                    onAdd={addStudioScene}
+                    onDuplicate={duplicateStudioScene}
+                    onDelete={deleteStudioScene}
+                  />
+                  <SceneLayerPanel
+                    layers={scene.layers}
+                    cameraSources={cameras.filter((camera) => camera.videoTrack).map((camera) => ({ id: camera.id, name: camera.label }))}
+                    cameraSourceIDs={sceneCameraSourceIDs}
+                    selectedCameraID={scene.sourceId}
+                    selectedID={selectedSceneLayerID}
+                    disabled={false}
+                    onCameraAdd={addCameraSource}
+                    onCameraRemove={removeCameraSource}
+                    onCameraSelect={selectCameraSource}
+                    onSelect={setSelectedSceneLayerID}
+                    onChange={updateSceneLayers}
+                  />
+                </div>
               </CardBody>
             </Card>
           )}
@@ -861,11 +1015,6 @@ export default function StudioPage() {
                     <CameraPreviewCard 
                       key={camera.id} 
                       camera={camera} 
-                      isPreview={previewCameraId === camera.id}
-                      isActive={activeCameraId === camera.id} 
-                      isLive={isLive} 
-                      onTake={() => selectCamera(camera.id)}
-                      onKick={() => disconnectSource(camera.id)}
                     />
                   ))
                 )}
@@ -958,7 +1107,7 @@ export default function StudioPage() {
   );
 }
 
-function CameraPreviewCard({ camera, isPreview, isActive, isLive, onTake, onKick }: { camera: CameraSource, isPreview: boolean, isActive: boolean, isLive: boolean, onTake: () => void, onKick?: () => void }) {
+function CameraPreviewCard({ camera }: { camera: CameraSource }) {
     const videoRef = useRef<HTMLVideoElement>(null);
     useEffect(() => {
         if (camera.videoTrack && videoRef.current) {
@@ -967,46 +1116,20 @@ function CameraPreviewCard({ camera, isPreview, isActive, isLive, onTake, onKick
     }, [camera.videoTrack]);
 
     return (
-      <Card 
-        onClick={() => !isPreview && onTake()}
-        style={{ 
-          overflow: "hidden", 
-          borderColor: isActive ? "var(--brand-accent)" : (isPreview ? "var(--primary)" : "var(--border-subtle)"), 
-          boxShadow: isActive ? "0 0 0 1px var(--brand-accent)" : "none", 
-          transition: "all 0.2s ease",
-          cursor: isPreview ? "default" : "pointer"
-        }}
-      >
+      <Card style={{ overflow: "hidden", borderColor: "var(--border-subtle)" }}>
         <div style={{ position: "relative", aspectRatio: "16/9", background: "#000" }}>
           <video ref={videoRef} autoPlay playsInline muted style={{ width: "100%", height: "100%", objectFit: "cover" }} />
           {!camera.videoTrack && <div style={{ position: "absolute", inset: 0, display: "grid", placeContent: "center", color: "var(--text-tertiary)", fontSize: "12px", fontWeight: 600 }}>NO SIGNAL</div>}
-          <div style={{ position: "absolute", top: "8px", right: "8px", display: "flex", gap: "4px" }}>
-            {isPreview && (
-              <Badge variant="default" showDot>
-                PREVIEW
-              </Badge>
-            )}
-            {isActive && (
-              <Badge variant={isLive ? "live" : "success"} showDot>
-                PROGRAM
-              </Badge>
-            )}
-          </div>
+          <Badge variant={camera.videoTrack ? "success" : "default"} showDot style={{ position: "absolute", top: "8px", right: "8px" }}>
+            {camera.videoTrack ? "CONNECTED" : "NO SIGNAL"}
+          </Badge>
         </div>
         <div style={{ padding: "12px", display: "flex", flexDirection: "column", gap: "12px", background: "var(--bg-surface)" }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <div style={{ display: "flex", flexDirection: "column" }}>
               <span style={{ fontSize: "13px", fontWeight: 600 }}>{camera.label}</span>
-              <span className="text-sm" style={{ fontSize: "11px", color: "var(--text-secondary)" }}>{camera.id.split('-').pop()}</span>
+              <span className="text-sm" style={{ fontSize: "11px", color: "var(--text-secondary)" }}>MONITOR ONLY · {camera.id.split('-').pop()}</span>
             </div>
-            {onKick && (
-              <button 
-                onClick={(e) => { e.stopPropagation(); onKick(); }} 
-                style={{ background: "transparent", border: "none", color: "var(--text-tertiary)", cursor: "pointer", padding: "4px", borderRadius: "4px", display: "flex" }}
-              >
-                <X size={16} />
-              </button>
-            )}
           </div>
         </div>
       </Card>

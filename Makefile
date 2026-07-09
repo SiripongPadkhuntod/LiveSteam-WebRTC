@@ -1,4 +1,4 @@
-.PHONY: infra-up infra-down backend frontend test
+.PHONY: infra-up infra-down backend frontend load-test test
 
 infra-up:
 	sh scripts/start-local.sh
@@ -11,6 +11,9 @@ backend:
 
 frontend:
 	cd frontend && npm run dev
+
+load-test:
+	./load-test.sh
 
 test:
 	cd backend && go test ./...

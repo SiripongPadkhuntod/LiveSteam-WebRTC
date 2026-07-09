@@ -10,7 +10,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { SceneOverlay } from "@/components/studio/scene-editor";
 import { emptyProgramScene, type ProgramScene } from "@/lib/scene";
-import { Users, Play, Square, Volume2, MonitorOff, UserX, Maximize, Minimize } from "lucide-react";
+import { Users, RefreshCw, Square, Volume2, MonitorOff, UserX, Maximize, Minimize } from "lucide-react";
 export default function WatchPage() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const viewerFrameRef = useRef<HTMLDivElement>(null);
@@ -20,8 +20,10 @@ export default function WatchPage() {
   const composedVideoTrack = useRef<RemoteTrack | null>(null);
   const composedVideoPublication = useRef<RemoteTrackPublication | null>(null);
   const audioElements = useRef<HTMLAudioElement[]>([]);
+  const autoWatchStarted = useRef(false);
+  const connectingRef = useRef(false);
   const [status, setStatus] = useState<"idle" | "connecting" | "watching" | "error">("idle");
-  const [message, setMessage] = useState("กดรับชมเพื่อเชื่อมต่อ Live Stream");
+  const [message, setMessage] = useState("กำลังเตรียมเชื่อมต่อ Live Stream…");
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isFallbackFullscreen, setIsFallbackFullscreen] = useState(false);
   const [viewerCount, setViewerCount] = useState(0);
@@ -45,18 +47,28 @@ export default function WatchPage() {
   }, []);
 
   useEffect(() => {
-    setRoomName(channelIDFromSearch(window.location.search));
+    const nextRoomName = channelIDFromSearch(window.location.search);
+    setRoomName(nextRoomName);
+    if (!autoWatchStarted.current) {
+      autoWatchStarted.current = true;
+      void watch(nextRoomName);
+    }
+    // watch() intentionally reads the latest refs/state; this effect should
+    // auto-join only once when the viewer opens the link.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
     void getProgramScene(roomName).then(setProgramScene).catch(() => {});
   }, [roomName]);
 
-  async function watch() {
+  async function watch(targetRoomName = roomName) {
+    if (connectingRef.current || roomRef.current) return;
+    connectingRef.current = true;
     setStatus("connecting");
     setMessage("กำลังเชื่อมต่อ…");
     try {
-      const credentials = await getConnectionToken(participantID("viewer"), programRoomID(roomName), "viewer", "d1");
+      const credentials = await getConnectionToken(participantID("viewer"), programRoomID(targetRoomName), "viewer", "d1");
       const room = new Room({ adaptiveStream: false, dynacast: false });
       const refreshViewerCount = () => {
         const remoteViewers = Array.from(room.remoteParticipants.values())
@@ -103,6 +115,16 @@ export default function WatchPage() {
         }
       });
       room.on(RoomEvent.Disconnected, () => {
+        if (roomRef.current === room) roomRef.current = null;
+        audioElements.current.forEach((element) => element.remove());
+        audioElements.current = [];
+        selectedVideoTrack.current = null;
+        directVideoTrack.current = null;
+        composedVideoTrack.current = null;
+        composedVideoPublication.current = null;
+        setHasProgramVideo(false);
+        setAudioBlocked(false);
+        if (videoRef.current) videoRef.current.srcObject = null;
         setStatus("idle");
         setViewerCount(0);
         setMessage("การเชื่อมต่อสิ้นสุดแล้ว");
@@ -118,12 +140,16 @@ export default function WatchPage() {
       setStatus("watching");
       setMessage("กำลังรับชมแบบ Real-time");
     } catch (error) {
+      disconnect();
       setStatus("error");
       setMessage(error instanceof Error ? error.message : "เชื่อมต่อไม่สำเร็จ");
+    } finally {
+      connectingRef.current = false;
     }
   }
 
   function disconnect() {
+    connectingRef.current = false;
     roomRef.current?.disconnect();
     roomRef.current = null;
     audioElements.current.forEach((element) => element.remove());
@@ -238,11 +264,7 @@ export default function WatchPage() {
           <p className="text-body" style={{ marginTop: "16px" }}>ภาพ Program Output จากผู้ควบคุม คุณจะได้รับภาพและเสียงที่ถูกเลือกให้ออกอากาศโดยอัตโนมัติ</p>
           
           <div style={{ marginTop: "32px", display: "flex", justifyContent: "center", gap: "12px" }}>
-            {!watching ? (
-              <Button variant="primary" size="lg" disabled={status === "connecting"} onClick={watch} isLoading={status === "connecting"} style={{ background: "var(--danger)", color: "white" }}>
-                <Play size={18} /> รับชม Live
-              </Button>
-            ) : (
+            {watching ? (
               <div className="viewer-actions" style={{ display: "flex", gap: "12px" }}>
                 {audioBlocked && (
                   <Button variant="primary" onClick={enableAudio}>
@@ -252,6 +274,14 @@ export default function WatchPage() {
                 <Button variant="danger" onClick={stopWatching}>
                   <Square size={16} /> หยุดรับชม
                 </Button>
+              </div>
+            ) : status === "error" || status === "idle" ? (
+              <Button variant="secondary" size="lg" onClick={() => watch(roomName)}>
+                <RefreshCw size={18} /> เชื่อมต่อใหม่
+              </Button>
+            ) : (
+              <div className="viewer-actions" style={{ color: "var(--text-secondary)", fontSize: "13px" }}>
+                {status === "connecting" ? "กำลังเชื่อมต่อ Live Stream…" : "กำลังเริ่มรับชม…"}
               </div>
             )}
           </div>
