@@ -5,15 +5,14 @@ import { useEffect, useRef, useState } from "react";
 import { ConnectionState, Room, RoomEvent, Track } from "livekit-client";
 import { findRoomByCode, getConnectionToken, participantID, type BroadcastRoom } from "@/lib/api";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import { Card, CardBody, CardHeader } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { Mic, MicOff, UserX, Square, Info } from "lucide-react";
+import { Mic, MicOff, UserX, Square, Info, Radio, CircleAlert, AudioLines, Settings2 } from "lucide-react";
 
 export default function MicrophonePage() {
   const roomRef = useRef<Room | null>(null);
   const localStream = useRef<MediaStream | null>(null);
   const identityRef = useRef("");
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const meterFrameRef = useRef<number | null>(null);
   const [status, setStatus] = useState<"idle" | "connecting" | "connected" | "error">("idle");
   const [message, setMessage] = useState("กรอก Room Code เพื่อเชื่อมไมโครโฟน");
   const [connectionState, setConnectionState] = useState("Disconnected");
@@ -21,6 +20,9 @@ export default function MicrophonePage() {
   const [connectedRoom, setConnectedRoom] = useState<BroadcastRoom | null>(null);
   const [microphoneName, setMicrophoneName] = useState("Microphone");
   const [muted, setMuted] = useState(false);
+  const [audioDevices, setAudioDevices] = useState<MediaDeviceInfo[]>([]);
+  const [selectedDeviceID, setSelectedDeviceID] = useState("");
+  const [audioLevel, setAudioLevel] = useState(0);
 
   useEffect(() => {
     identityRef.current = participantID("microphone");
@@ -30,6 +32,20 @@ export default function MicrophonePage() {
 
   useEffect(() => () => {
     void stopMicrophone();
+  }, []);
+
+  useEffect(() => {
+    const refreshDevices = async () => {
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        setAudioDevices(devices.filter((device) => device.kind === "audioinput"));
+      } catch {
+        // Device labels remain unavailable until permission is granted.
+      }
+    };
+    void refreshDevices();
+    navigator.mediaDevices.addEventListener("devicechange", refreshDevices);
+    return () => navigator.mediaDevices.removeEventListener("devicechange", refreshDevices);
   }, []);
 
   async function startMicrophone() {
@@ -45,9 +61,12 @@ export default function MicrophonePage() {
       const roomInfo = await findRoomByCode(normalizedCode);
       const stream = await navigator.mediaDevices.getUserMedia({
         video: false,
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        audio: { deviceId: selectedDeviceID ? { exact: selectedDeviceID } : undefined, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
       });
       localStream.current = stream;
+      startAudioMeter(stream);
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      setAudioDevices(devices.filter((device) => device.kind === "audioinput"));
 
       const credentials = await getConnectionToken(identityRef.current, roomInfo.id, "broadcaster");
       const room = new Room({ adaptiveStream: true, dynacast: true });
@@ -101,123 +120,65 @@ export default function MicrophonePage() {
     roomRef.current = null;
     localStream.current?.getTracks().forEach((track) => track.stop());
     localStream.current = null;
+    stopAudioMeter();
     setStatus("idle");
     setConnectedRoom(null);
     setMuted(false);
     setConnectionState("Disconnected");
   }
 
+  function startAudioMeter(stream: MediaStream) {
+    stopAudioMeter();
+    const context = new AudioContext();
+    const analyser = context.createAnalyser();
+    analyser.fftSize = 512;
+    analyser.smoothingTimeConstant = 0.76;
+    context.createMediaStreamSource(stream).connect(analyser);
+    audioContextRef.current = context;
+    const samples = new Uint8Array(analyser.fftSize);
+    const readLevel = () => {
+      analyser.getByteTimeDomainData(samples);
+      let squareSum = 0;
+      for (const sample of samples) {
+        const normalized = (sample - 128) / 128;
+        squareSum += normalized * normalized;
+      }
+      setAudioLevel(Math.min(1, Math.sqrt(squareSum / samples.length) * 5.5));
+      meterFrameRef.current = requestAnimationFrame(readLevel);
+    };
+    readLevel();
+  }
+
+  function stopAudioMeter() {
+    if (meterFrameRef.current !== null) cancelAnimationFrame(meterFrameRef.current);
+    meterFrameRef.current = null;
+    audioContextRef.current?.close().catch(() => undefined);
+    audioContextRef.current = null;
+    setAudioLevel(0);
+  }
+
   const isWorking = status === "connecting" || status === "connected";
+  const isLiveAudio = status === "connected" && !muted;
 
   return (
-    <main className="shell studio-page" style={{ paddingBottom: 120 }}>
-      <header className="topbar">
-        <Link className="brand" href="/">
-          <div className="brand-dot" />
-          LocalStream
-        </Link>
-        <div className="status-cluster" style={{ display: "flex", gap: "12px", alignItems: "center" }}>
-          <Badge variant={status === "connected" ? (muted ? "default" : "live") : "default"} showDot>
-            {status === "connected" ? (muted ? "MUTED" : "CONNECTED") : status === "connecting" ? "CONNECTING" : "OFFLINE"}
-          </Badge>
-          <span className="connection text-sm">SFU · {connectionState}</span>
-        </div>
-      </header>
-
-      <section className="studio-heading" style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", padding: "32px 0" }}>
-        <div>
-          <p className="eyebrow" style={{ color: "var(--brand-accent)", marginBottom: "8px" }}>AUDIO SOURCE</p>
-          <h1 className="h1">{microphoneName}</h1>
-        </div>
-        <div className="room-label text-sm" style={{ textAlign: "right" }}>
-          <span style={{ display: "block", color: "var(--text-tertiary)", fontSize: "11px", letterSpacing: "0.1em", marginBottom: "4px" }}>
-            ROOM
-          </span>
-          {connectedRoom ? `${connectedRoom.name} · ${connectedRoom.code}` : "NOT CONNECTED"}
-        </div>
-      </section>
-
-      <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: "24px" }}>
-        {!isWorking && (
-          <Card style={{ maxWidth: "500px", margin: "0 auto", width: "100%" }}>
-            <CardBody style={{ display: "flex", flexDirection: "column", gap: "16px", padding: "32px" }}>
-              <div style={{ textAlign: "center", marginBottom: "8px" }}>
-                <Mic size={32} style={{ margin: "0 auto 12px", color: "var(--brand-accent)" }} />
-                <h2 className="h3">เชื่อมต่อไมโครโฟน</h2>
-                <p className="text-sm" style={{ marginTop: "8px" }}>รับ Room Code จากผู้สร้างห้อง (Studio) แล้วกรอกด้านล่างเพื่อส่งสัญญาณเสียง</p>
-              </div>
-              <Input
-                label="ROOM CODE"
-                id="microphone-room-code"
-                value={roomCode}
-                onChange={(event) => setRoomCode(event.target.value.replace(/[^a-zA-Z0-9-]/g, "").toUpperCase())}
-                placeholder="เช่น A7K9P2"
-                maxLength={8}
-                style={{ textAlign: "center", fontSize: "24px", letterSpacing: "0.2em", height: "60px", fontWeight: 700 }}
-              />
-              <Button
-                variant="primary"
-                size="lg"
-                onClick={startMicrophone}
-                disabled={!roomCode.trim()}
-                style={{ width: "100%", marginTop: "8px" }}
-              >
-                เชื่อมต่อไมโครโฟน
-              </Button>
-            </CardBody>
-          </Card>
-        )}
-
-        <Card>
-          <CardHeader style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "16px 24px" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-              {muted ? <MicOff size={18} style={{ color: "var(--danger)" }} /> : <Mic size={18} style={{ color: "var(--text-secondary)" }} />}
-              <span style={{ fontWeight: 600 }}>Microphone Status</span>
-            </div>
-            <span className="text-sm">ไมโครโฟนของคุณ</span>
-          </CardHeader>
-          <CardBody style={{ padding: 0 }}>
-            <div className={`microphone-stage ${status === "connected" && !muted ? "active" : ""}`} style={{ width: "100%", aspectRatio: "16/9", position: "relative", backgroundColor: "#000", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", transition: "all 0.3s ease" }}>
-
-              <div style={{ width: "120px", height: "120px", borderRadius: "50%", background: status === "connected" && !muted ? "rgba(255, 62, 0, 0.15)" : "rgba(255, 255, 255, 0.05)", display: "flex", alignItems: "center", justifyContent: "center", marginBottom: "24px", transition: "all 0.3s ease", boxShadow: status === "connected" && !muted ? "0 0 0 20px rgba(255, 62, 0, 0.05), 0 0 0 40px rgba(255, 62, 0, 0.02)" : "none" }}>
-                {muted ? <MicOff size={48} style={{ color: "var(--danger)" }} /> : <Mic size={48} style={{ color: status === "connected" ? "var(--brand-accent)" : "var(--text-tertiary)" }} />}
-              </div>
-
-              <span style={{ fontSize: "14px", letterSpacing: "0.15em", fontWeight: 600, color: status === "connected" && !muted ? "var(--brand-accent)" : "var(--text-secondary)" }}>
-                {status === "connected" ? (muted ? "MICROPHONE MUTED" : "MICROPHONE CONNECTED") : "MICROPHONE OFFLINE"}
-              </span>
-              <p className="text-sm" style={{ marginTop: "12px", color: "var(--text-tertiary)" }}>
-                {connectedRoom ? `Room Code · ${connectedRoom.code}` : "กรอก Code แล้วอนุญาตการใช้ไมโครโฟน"}
-              </p>
-            </div>
-          </CardBody>
-        </Card>
-      </div>
-
-      <footer className="control-dock" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", position: "fixed", bottom: 0, left: 0, right: 0, padding: "16px 24px", background: "rgba(10,10,10,0.85)", backdropFilter: "blur(12px)", borderTop: "1px solid var(--border-strong)", zIndex: 100 }}>
-        <div style={{ color: status === "error" ? "var(--danger)" : "var(--text-secondary)", fontSize: "14px", display: "flex", alignItems: "center", gap: "8px" }}>
-          {status === "error" ? <UserX size={16} /> : <Info size={16} />}
-          {message}
-        </div>
-        <div className="dock-actions" style={{ display: "flex", gap: "12px" }}>
-          {!isWorking && (
-             <Link href="/channels">
-               <Button variant="ghost">กลับ</Button>
-             </Link>
-          )}
-          {status === "connected" && (
-            <Button variant={muted ? "primary" : "secondary"} onClick={toggleMute}>
-              {muted ? <Mic size={16} /> : <MicOff size={16} />}
-              {muted ? "เปิดไมค์" : "ปิดเสียงไมค์"}
-            </Button>
-          )}
-          {isWorking && (
-            <Button variant="danger" onClick={stopMicrophone}>
-              <Square size={16} /> หยุดการทำงาน
-            </Button>
-          )}
-        </div>
-      </footer>
+    <main className="audio-operator">
+      <header className="audio-operator-header"><Link className="brand" href="/"><div className="brand-dot" />LocalStream</Link>{isWorking && <span className={`camera-operator-connection ${isLiveAudio ? "live" : ""}`}><i /> {muted ? "MUTED" : status === "connected" ? "MIC LIVE" : "CONNECTING"}</span>}</header>
+      {!isWorking ? <section className="audio-join-card">
+        <div className="audio-join-icon"><AudioLines size={29} /></div><p>AUDIO OPERATOR</p><h1>พร้อมส่งเสียง</h1><span>กรอก Room Code แล้วอนุญาตให้เว็บไซต์ใช้ไมโครโฟน</span>
+        {audioDevices.length > 1 && <label className="audio-device-select"><span><Settings2 size={14} /> MICROPHONE</span><select value={selectedDeviceID} onChange={(event) => setSelectedDeviceID(event.target.value)}><option value="">Default microphone</option>{audioDevices.map((device, index) => <option key={device.deviceId} value={device.deviceId}>{device.label || `Microphone ${index + 1}`}</option>)}</select></label>}
+        <label className="audio-room-input">ROOM CODE<input id="microphone-room-code" value={roomCode} onChange={(event) => setRoomCode(event.target.value.replace(/[^a-zA-Z0-9-]/g, "").toUpperCase())} placeholder="A7K9P2" maxLength={8} autoComplete="off" autoFocus /></label>
+        {status === "error" && <div className="camera-join-error"><CircleAlert size={14} />{message}</div>}
+        <Button variant="primary" size="lg" onClick={startMicrophone} disabled={!roomCode.trim()}><Mic size={18} /> เปิดไมค์และเชื่อมต่อ</Button><Link href="/channels">กลับไปหน้าห้อง</Link>
+      </section> : <>
+        <section className={`audio-live-stage ${isLiveAudio ? "active" : ""} ${muted ? "muted" : ""}`}>
+          <div className="audio-live-room"><Radio size={13} /><span>LIVE TO STUDIO</span><strong>{connectedRoom?.name ?? "กำลังเชื่อมต่อ"}</strong><small>{connectedRoom?.code}</small></div>
+          <div className="audio-live-core">{muted ? <MicOff size={55} /> : <Mic size={55} />}</div><strong>{muted ? "MICROPHONE MUTED" : status === "connected" ? "MICROPHONE LIVE" : "CONNECTING MICROPHONE"}</strong><p>{muted ? "เสียงนี้จะไม่ถูกส่งออกจนกว่าจะเปิดไมค์" : "กำลังส่งสัญญาณเสียงไปยัง Studio"}</p>
+          <div className="audio-live-meter" aria-label="Live microphone level">{Array.from({ length: 31 }, (_, index) => <i key={index} style={{ height: `${Math.max(8, 16 + Math.min(84, audioLevel * 100) * (0.45 + ((index * 13) % 50) / 100))}%` }} />)}</div>
+        </section>
+        <section className="audio-operator-controls"><div><span>{microphoneName}</span><strong>{audioLevel > .08 && !muted ? "กำลังรับสัญญาณเสียง" : muted ? "ปิดเสียงอยู่" : "รอเสียงเข้า"}</strong><small>Opus · 48 kHz · Echo cancellation on</small></div><div className="audio-operator-actions"><button className={`audio-mute-control ${muted ? "muted" : ""}`} onClick={toggleMute}>{muted ? <Mic size={24} /> : <MicOff size={24} />}<span>{muted ? "เปิดไมค์" : "ปิดเสียง"}</span></button><button className="camera-round-control danger" onClick={stopMicrophone}><Square size={22} fill="currentColor" /><span>ปิดไมค์</span></button></div></section>
+      </>}
+      {status === "connecting" && <div className="camera-connecting"><Info size={16} /> {message}</div>}
+      {connectionState === "Disconnected" && status === "error" && <div className="camera-connecting error"><UserX size={16} /> {message}</div>}
     </main>
   );
 }

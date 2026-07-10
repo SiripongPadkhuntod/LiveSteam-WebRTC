@@ -5,9 +5,8 @@ import { useEffect, useState } from "react";
 import { createBroadcastRoom, listBroadcastRooms, type BroadcastRoom } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Card, CardBody } from "@/components/ui/card";
 import { Toast } from "@/components/ui/toast";
-import { Copy, MonitorPlay, Video, Mic, Plus, RadioTower } from "lucide-react";
+import { Copy, MonitorPlay, Video, Mic, Plus, Eye, ArrowUpRight, Clapperboard } from "lucide-react";
 
 export default function ChannelsPage() {
   const [rooms, setRooms] = useState<BroadcastRoom[]>([]);
@@ -70,35 +69,28 @@ export default function ChannelsPage() {
           <div className="brand-dot" />
           LocalStream
         </Link>
-        <span className="connection" style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-          <RadioTower size={14} /> LOCAL ROOM DIRECTORY
-        </span>
+        <span className="channel-directory-status"><i /> LOCAL CHANNEL DIRECTORY</span>
       </header>
 
-      <section className="channels-heading">
+      <section className="channel-directory-hero">
         <div>
-          <p className="eyebrow">BROADCAST ROOMS</p>
-          <h1 className="h1" style={{ marginBottom: "16px" }}>สร้างห้องถ่ายทอดสด</h1>
-          <p className="text-body">ระบบจะสร้าง Code สำหรับให้เครื่องกล้องและไมค์เชื่อมเข้าห้องนี้โดยตรง</p>
+          <p className="eyebrow">LIVE CHANNELS</p>
+          <h1>เลือก Channel<br />ที่ต้องการรับชม</h1>
+          <p>เข้าชมการถ่ายทอดสดได้โดยตรง หรือเปิด Studio เพื่อควบคุมการผลิตรายการ</p>
         </div>
-        <div className="source-links">
-          <Link target="_blank" href="/camera">
-            <Button variant="ghost">
-              <Video size={16} /> หน้ากล้อง
-            </Button>
-          </Link>
-          <Link target="_blank" href="/microphone">
-            <Button variant="ghost">
-              <Mic size={16} /> หน้าไมค์
-            </Button>
-          </Link>
+        <div className="channel-directory-tools">
+          <span>FOR PRODUCTION TEAM</span>
+          <div>
+            <Link target="_blank" href="/camera"><Button variant="secondary"><Video size={16} /> กล้อง</Button></Link>
+            <Link target="_blank" href="/microphone"><Button variant="secondary"><Mic size={16} /> ไมโครโฟน</Button></Link>
+          </div>
         </div>
       </section>
 
-      <Card style={{ marginBottom: "42px" }}>
-        <CardBody>
-          <form onSubmit={handleCreate} style={{ display: "flex", gap: "16px", alignItems: "flex-end", flexWrap: "wrap" }}>
-            <div style={{ flex: "1", minWidth: "260px" }}>
+      <section className="channel-create-card">
+        <div className="channel-create-heading"><div className="channel-create-icon"><Plus size={18} /></div><span><strong>สร้าง Channel ใหม่</strong><small>ระบบจะออก Room Code สำหรับกล้องและไมโครโฟน</small></span></div>
+        <form onSubmit={handleCreate} className="channel-create-form">
+            <div>
               <Input
                 label="ชื่อห้อง (Room Name)"
                 id="room-name"
@@ -112,43 +104,38 @@ export default function ChannelsPage() {
             <Button type="submit" variant="primary" disabled={isCreating} isLoading={isCreating}>
               <Plus size={18} /> สร้างห้องใหม่
             </Button>
-          </form>
-        </CardBody>
-      </Card>
+        </form>
+      </section>
 
-      <section className="channel-list">
-        {loading && <div style={{ padding: "40px", textAlign: "center", color: "var(--text-tertiary)" }}>กำลังโหลดห้อง...</div>}
+      <section className="channel-directory-list">
+        <div className="channel-directory-list-header"><span>ALL CHANNELS</span><strong>{rooms.length.toString().padStart(2, "0")} ROOMS</strong></div>
+        {loading && <div className="channel-directory-empty">กำลังโหลด Channel...</div>}
         
         {!loading && rooms.length === 0 && (
-          <div className="empty-rooms text-body">
+          <div className="channel-directory-empty">
             ยังไม่มีห้องถ่ายทอดสด สร้างห้องใหม่เพื่อเริ่มต้น
           </div>
         )}
 
         {rooms.map((room, index) => (
-          <article className="channel-row" key={room.id}>
-            <div className="channel-number">{(index + 1).toString().padStart(2, "0")}</div>
-            <div className="channel-info">
-              <span className="channel-id text-sm">{room.id}</span>
-              <h2 className="h3" style={{ margin: "4px 0" }}>{room.name}</h2>
-              <p className="text-sm">สร้างเมื่อ {new Date(room.createdAt).toLocaleString("th-TH")}</p>
+          <article className="channel-directory-card" key={room.id}>
+            <div className="channel-card-index">{(index + 1).toString().padStart(2, "0")}</div>
+            <div className="channel-card-main">
+              <div className="channel-card-state"><i /><span>READY TO WATCH</span></div>
+              <h2>{room.name}</h2>
+              <p><Clapperboard size={14} /> {room.id} <b>·</b> สร้างเมื่อ {new Date(room.createdAt).toLocaleString("th-TH")}</p>
             </div>
-            
-            <button className="room-code" type="button" onClick={() => copyCode(room.code)} title="กดเพื่อคัดลอก Code">
-              <small>ROOM CODE</small>
-              <strong style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "8px" }}>
-                {room.code}
-                <Copy size={16} style={{ color: "var(--text-tertiary)" }} />
-              </strong>
-            </button>
-
-            <div className="channel-actions">
-              <Link href={`/studio?channel=${room.id}&code=${room.code}`}>
-                <Button variant="secondary">
-                  <MonitorPlay size={16} /> เข้าห้อง Studio
+            <div className="channel-card-actions">
+              <Link href={`/watch?channel=${encodeURIComponent(room.id)}`}>
+                <Button variant="primary">
+                  <Eye size={16} /> เข้าชม <ArrowUpRight size={14} />
                 </Button>
               </Link>
+              <Link href={`/studio?channel=${room.id}&code=${room.code}`}>
+                <Button variant="ghost"><MonitorPlay size={16} /> Studio</Button>
+              </Link>
             </div>
+            <button className="channel-card-code" type="button" onClick={() => copyCode(room.code)} title="กดเพื่อคัดลอก Room Code"><span>ROOM CODE</span><strong>{room.code}</strong><Copy size={14} /></button>
           </article>
         ))}
       </section>
