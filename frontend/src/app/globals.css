@@ -126,7 +126,8 @@ button { font: inherit; }
 .scene-camera-picker button small { color: var(--text-tertiary); font-size: 9px; }
 .scene-camera-picker i { color: var(--success); font-size: 9px; font-style: normal; letter-spacing: .06em; }
 .scene-layer-list { display: flex; flex-direction: column; border-top: 1px solid var(--border-subtle); }
-.scene-layer-list > button { width: 100%; min-height: 58px; padding: 8px; display: grid; grid-template-columns: 18px 44px minmax(0,1fr) 30px 30px; align-items: center; gap: 10px; border: 0; border-bottom: 1px solid var(--border-subtle); background: transparent; color: var(--text-primary); text-align: left; cursor: pointer; }
+.scene-layer-list > button { width: 100%; min-height: 58px; padding: 8px; display: grid; grid-template-columns: 18px 44px minmax(0,1fr) 30px 30px 30px 30px 30px 30px 30px; align-items: center; gap: 10px; border: 0; border-bottom: 1px solid var(--border-subtle); background: transparent; color: var(--text-primary); text-align: left; cursor: pointer; }
+.scene-layer-list > button.scene-camera-source { grid-template-columns: 18px 44px minmax(0,1fr) 30px 30px; }
 .scene-layer-list > button:hover, .scene-layer-list > button.selected { background: var(--bg-elevated); }
 .scene-layer-list > button.selected { box-shadow: inset 2px 0 var(--brand-accent); }
 .scene-layer-list > button.dragging { opacity: .45; }
@@ -138,8 +139,9 @@ button { font: inherit; }
 .scene-layer-list span { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 .scene-layer-list strong { overflow: hidden; color: var(--text-primary); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .scene-layer-list small { color: var(--text-tertiary); font-size: 9px; letter-spacing: .08em; }
-.scene-layer-list i { width: 30px; height: 30px; display: grid; place-content: center; border-radius: 5px; color: var(--text-secondary); font-style: normal; }
+.scene-layer-list i { width: 30px; height: 30px; display: grid; place-content: center; border-radius: 5px; color: var(--text-secondary); font-size: 10px; font-style: normal; }
 .scene-layer-list i:hover { background: rgba(255,255,255,.08); color: var(--text-primary); }
+.scene-layer-list i.active { background: rgba(59,130,246,.16); color: var(--brand-accent); }
 .scene-layer-empty, .scene-layer-hint, .scene-layer-error { margin: 0; font-size: 11px; line-height: 1.6; }
 .scene-layer-empty, .scene-layer-hint { color: var(--text-tertiary); }
 .scene-layer-error { color: #fca5a5; }

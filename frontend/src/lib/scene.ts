@@ -10,6 +10,9 @@ export type SceneImageLayer = {
   opacity: number;
   zIndex: number;
   visible: boolean;
+  flipH?: boolean;
+  flipV?: boolean;
+  rotation?: number;
 };
 
 export type ProgramScene = {

@@ -23,17 +23,20 @@ import (
 )
 
 type sceneImageLayer struct {
-	ID      string  `json:"id"`
-	Type    string  `json:"type"`
-	Name    string  `json:"name"`
-	Src     string  `json:"src"`
-	X       float64 `json:"x"`
-	Y       float64 `json:"y"`
-	Width   float64 `json:"width"`
-	Height  float64 `json:"height"`
-	Opacity float64 `json:"opacity"`
-	ZIndex  int     `json:"zIndex"`
-	Visible bool    `json:"visible"`
+	ID       string  `json:"id"`
+	Type     string  `json:"type"`
+	Name     string  `json:"name"`
+	Src      string  `json:"src"`
+	X        float64 `json:"x"`
+	Y        float64 `json:"y"`
+	Width    float64 `json:"width"`
+	Height   float64 `json:"height"`
+	Opacity  float64 `json:"opacity"`
+	ZIndex   int     `json:"zIndex"`
+	Visible  bool    `json:"visible"`
+	FlipH    bool    `json:"flipH,omitempty"`
+	FlipV    bool    `json:"flipV,omitempty"`
+	Rotation float64 `json:"rotation,omitempty"`
 }
 
 type programScene struct {

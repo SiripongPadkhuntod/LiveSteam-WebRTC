@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"os"
 	"os/exec"
@@ -179,7 +180,18 @@ func ffmpegArgs(scene programScene, assetDir, inputSDP string, port int) []strin
 		y := max(0, int(layer.Y*10.8))
 		imageLabel := "img" + strconv.Itoa(index+1)
 		outputLabel := "v" + strconv.Itoa(index+1)
-		filter += fmt.Sprintf(";[%d:v]scale=%d:%d[%s];[%s][%s]overlay=%d:%d[%s]", index+1, width, height, imageLabel, current, imageLabel, x, y, outputLabel)
+		imageFilter := fmt.Sprintf("scale=%d:%d,format=rgba", width, height)
+		if layer.FlipH {
+			imageFilter += ",hflip"
+		}
+		if layer.FlipV {
+			imageFilter += ",vflip"
+		}
+		if rotation := normalizeLayerRotation(layer.Rotation); rotation != 0 {
+			radians := rotation * math.Pi / 180
+			imageFilter += fmt.Sprintf(",rotate=%0.8f:c=none:ow=rotw(%0.8f):oh=roth(%0.8f)", radians, radians, radians)
+		}
+		filter += fmt.Sprintf(";[%d:v]%s[%s];[%s][%s]overlay=%d:%d[%s]", index+1, imageFilter, imageLabel, current, imageLabel, x, y, outputLabel)
 		current = outputLabel
 	}
 	args = append(args,
@@ -206,4 +218,12 @@ func availableUDPPort() (int, error) {
 
 func stringsHasAssetPrefix(value string) bool {
 	return len(value) > len("/api/assets/") && value[:len("/api/assets/")] == "/api/assets/"
+}
+
+func normalizeLayerRotation(value float64) float64 {
+	rotation := math.Mod(math.Round(value), 360)
+	if rotation < 0 {
+		rotation += 360
+	}
+	return rotation
 }

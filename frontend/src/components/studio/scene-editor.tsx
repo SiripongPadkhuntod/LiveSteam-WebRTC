@@ -1,7 +1,7 @@
 "use client";
 
 import { useRef, useState, type ChangeEvent, type DragEvent, type PointerEvent as ReactPointerEvent } from "react";
-import { Copy, Eye, EyeOff, GripVertical, ImagePlus, Layers3, Plus, Trash2, Video } from "lucide-react";
+import { Copy, Eye, EyeOff, FlipHorizontal2, FlipVertical2, GripVertical, ImagePlus, Layers3, Plus, RotateCcw, RotateCw, Trash2, Video } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { uploadSceneAsset } from "@/lib/api";
 import type { SceneImageLayer } from "@/lib/scene";
@@ -127,10 +127,15 @@ export function SceneOverlay({
           onPointerDown={(event) => startDrag(event, layer, "move")}
           onPointerMove={moveDrag}
           onPointerUp={() => { dragRef.current = null; }}
-          title={layer.name}
+          title={disabled ? undefined : layer.name}
         >
           {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src={layer.src} alt={layer.name} draggable={false} />
+          <img
+            src={layer.src}
+            alt={layer.name}
+            draggable={false}
+            style={{ transform: layerTransform(layer) }}
+          />
           {!disabled && selectedID === layer.id && (
             <div
               className="scene-resize-handle"
@@ -198,7 +203,7 @@ export function SceneLayerPanel({
         id, type: "image", name: file.name, src: asset.url,
         x: 70, y: 5, width: 25, height: 25, opacity: 1,
         zIndex: Math.max(0, ...layers.map((item) => item.zIndex)) + 1,
-        visible: true,
+        visible: true, flipH: false, flipV: false, rotation: 0,
       };
       onChange([...layers, layer]);
       onSelect(id);
@@ -211,6 +216,10 @@ export function SceneLayerPanel({
 
   function update(id: string, patch: Partial<SceneImageLayer>) {
     onChange(layers.map((layer) => layer.id === id ? { ...layer, ...patch } : layer));
+  }
+
+  function rotate(id: string, layer: SceneImageLayer, degrees: number) {
+    update(id, { rotation: normalizeRotation((layer.rotation ?? 0) + degrees) });
   }
 
   function reorderLayers(targetID: string) {
@@ -318,13 +327,54 @@ export function SceneLayerPanel({
             >
               <GripVertical className="scene-layer-drag-handle" size={15} aria-label="ลากเพื่อเปลี่ยนลำดับ" />
               {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src={layer.src} alt="" />
-              <span><strong>{layer.name}</strong><small>IMAGE · Z {layer.zIndex}</small></span>
+              <img src={layer.src} alt="" style={{ transform: layerTransform(layer) }} />
+              <span>
+                <strong>{layer.name}</strong>
+                <small>
+                  IMAGE · Z {layer.zIndex}
+                  {layer.flipH ? " · FLIP H" : ""}
+                  {layer.flipV ? " · FLIP V" : ""}
+                  {layer.rotation ? ` · ${normalizeRotation(layer.rotation)}°` : ""}
+                </small>
+              </span>
               <i
                 role="button"
                 aria-label={layer.visible ? "ซ่อน Layer" : "แสดง Layer"}
                 onClick={(event) => { event.stopPropagation(); update(layer.id, { visible: !layer.visible }); }}
               >{layer.visible ? <Eye size={14} /> : <EyeOff size={14} />}</i>
+              <i
+                className={layer.flipH ? "active" : ""}
+                role="button"
+                aria-label={layer.flipH ? "ยกเลิก Flip H" : "Flip H"}
+                title="Flip H"
+                onClick={(event) => { event.stopPropagation(); update(layer.id, { flipH: !layer.flipH }); }}
+              ><FlipHorizontal2 size={14} /></i>
+              <i
+                className={layer.flipV ? "active" : ""}
+                role="button"
+                aria-label={layer.flipV ? "ยกเลิก Flip V" : "Flip V"}
+                title="Flip V"
+                onClick={(event) => { event.stopPropagation(); update(layer.id, { flipV: !layer.flipV }); }}
+              ><FlipVertical2 size={14} /></i>
+              <i
+                role="button"
+                aria-label="หมุนซ้าย 15 องศา"
+                title="หมุนซ้าย 15°"
+                onClick={(event) => { event.stopPropagation(); rotate(layer.id, layer, -15); }}
+              ><RotateCcw size={14} /></i>
+              <i
+                role="button"
+                aria-label="หมุนขวา 15 องศา"
+                title="หมุนขวา 15°"
+                onClick={(event) => { event.stopPropagation(); rotate(layer.id, layer, 15); }}
+              ><RotateCw size={14} /></i>
+              <i
+                className={layer.rotation ? "active" : ""}
+                role="button"
+                aria-label="รีเซ็ตองศาการหมุน"
+                title="รีเซ็ตหมุน 0°"
+                onClick={(event) => { event.stopPropagation(); update(layer.id, { rotation: 0 }); }}
+              >0°</i>
               <i
                 role="button"
                 aria-label="ลบ Layer"
@@ -345,4 +395,13 @@ export function SceneLayerPanel({
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
+}
+
+function normalizeRotation(value: number) {
+  return ((Math.round(value) % 360) + 360) % 360;
+}
+
+function layerTransform(layer: SceneImageLayer) {
+  const rotation = normalizeRotation(layer.rotation ?? 0);
+  return `rotate(${rotation}deg) scale(${layer.flipH ? -1 : 1}, ${layer.flipV ? -1 : 1})`;
 }
