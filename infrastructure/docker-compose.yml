@@ -68,11 +68,16 @@ services:
     build:
       context: ../frontend
       dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_ANT_MEDIA_WEBSOCKET_URL: ${ANT_MEDIA_WEBSOCKET_URL:-wss://rtc2.streamssl.com:5443/WebRTCAppEE/websocket}
+        NEXT_PUBLIC_ANT_MEDIA_STREAM_ID: ${ANT_MEDIA_STREAM_ID:-sell-image}
     restart: unless-stopped
     environment:
       - CONTROL_API_URL=http://backend:8080
       - LIVEKIT_PUBLIC_URL=wss://${LIVEKIT_NODE_IP:-127.0.0.1}:7443
       - D1_LIVEKIT_PUBLIC_URL=wss://${LIVEKIT_NODE_IP:-127.0.0.1}:7444
+      - NEXT_PUBLIC_ANT_MEDIA_WEBSOCKET_URL=${ANT_MEDIA_WEBSOCKET_URL:-wss://rtc2.streamssl.com:5443/WebRTCAppEE/websocket}
+      - NEXT_PUBLIC_ANT_MEDIA_STREAM_ID=${ANT_MEDIA_STREAM_ID:-sell-image}
       - PORT=3001
     ports:
       - "3001:3001"

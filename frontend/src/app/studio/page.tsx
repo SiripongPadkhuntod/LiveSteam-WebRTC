@@ -13,6 +13,7 @@ import {
   type RemoteTrackPublication,
   type RemoteParticipant,
 } from "livekit-client";
+import type { WebRTCAdaptor } from "@antmedia/webrtc_adaptor";
 import { ensureProgramBridge, getConnectionToken, getProgramScene } from "@/lib/api";
 import { channelByID, channelIDFromSearch, DEFAULT_CHANNEL_ID, programRoomID } from "@/lib/channels";
 import { Button } from "@/components/ui/button";
@@ -44,6 +45,21 @@ type AudioMixSetting = {
 };
 
 type StudioScene = StudioSceneItem & { scene: ProgramScene; cameraSourceIDs: string[] };
+type OutputTarget = "livekit" | "antmedia" | "custom";
+type WebRTCMetrics = {
+  rttMs: number | null;
+  estimatedDelayMs: number | null;
+  jitterMs: number | null;
+  bitrateKbps: number | null;
+  packetLossPct: number | null;
+  fps: number | null;
+};
+
+const emptyWebRTCMetrics: WebRTCMetrics = { rttMs: null, estimatedDelayMs: null, jitterMs: null, bitrateKbps: null, packetLossPct: null, fps: null };
+
+const defaultAntMediaURL = process.env.NEXT_PUBLIC_ANT_MEDIA_WEBSOCKET_URL
+  ?? "wss://rtc2.streamssl.com:5443/WebRTCAppEE/websocket";
+const defaultAntMediaStreamKey = process.env.NEXT_PUBLIC_ANT_MEDIA_STREAM_ID ?? "sell-image";
 
 export default function StudioPage() {
   const outputVideo = useRef<HTMLVideoElement>(null);
@@ -62,6 +78,11 @@ export default function StudioPage() {
   const audioSourcesRef = useRef<AudioSource[]>([]);
   const audioMixSettingsRef = useRef<Record<string, AudioMixSetting>>({});
   const sceneDirtyRef = useRef(false);
+  const antMediaPublisherRef = useRef<WebRTCAdaptor | null>(null);
+  const antMediaPlayerRef = useRef<WebRTCAdaptor | null>(null);
+  const antMediaStreamKeyRef = useRef("");
+  const outputTargetRef = useRef<OutputTarget>("livekit");
+  const statsSampleRef = useRef<{ bytes: number; timestamp: number } | null>(null);
 
   const [cameras, setCameras] = useState<CameraSource[]>([]);
   const [audioSources, setAudioSources] = useState<AudioSource[]>([]);
@@ -88,6 +109,13 @@ export default function StudioPage() {
   const [previewSceneDirty, setPreviewSceneDirty] = useState(false);
   const [loadedSceneRoom, setLoadedSceneRoom] = useState<string | null>(null);
   const [selectedSceneLayerID, setSelectedSceneLayerID] = useState<string | null>(null);
+  const [outputTarget, setOutputTarget] = useState<OutputTarget>("livekit");
+  const [antMediaURL, setAntMediaURL] = useState(defaultAntMediaURL);
+  const [antMediaStreamKey, setAntMediaStreamKey] = useState(defaultAntMediaStreamKey);
+  const [antMediaPublishToken, setAntMediaPublishToken] = useState("");
+  const [antMediaPlayToken, setAntMediaPlayToken] = useState("");
+  const [antMediaState, setAntMediaState] = useState("ไม่ได้เชื่อมต่อ");
+  const [webRTCMetrics, setWebRTCMetrics] = useState<WebRTCMetrics>(emptyWebRTCMetrics);
 
   const activeCameraIdRef = useRef<string | null>(null);
   const previewCameraIdRef = useRef<string | null>(null);
@@ -157,6 +185,75 @@ export default function StudioPage() {
     statusRef.current = status;
   }, [status]);
 
+  useEffect(() => {
+    outputTargetRef.current = outputTarget;
+  }, [outputTarget]);
+
+  const isExternalOutput = outputTarget !== "livekit";
+
+  useEffect(() => {
+    if (status === "idle" || status === "error") {
+      statsSampleRef.current = null;
+      setWebRTCMetrics(emptyWebRTCMetrics);
+      return;
+    }
+    void refreshWebRTCMetrics();
+    const timer = window.setInterval(() => void refreshWebRTCMetrics(), 2000);
+    return () => window.clearInterval(timer);
+  }, [status]);
+
+  async function refreshWebRTCMetrics() {
+    const room = outputTargetRef.current === "livekit" ? outputPublisherRoom.current ?? publisherRoom.current : publisherRoom.current;
+    const transport = room?.engine.pcManager?.publisher ?? room?.engine.pcManager?.subscriber;
+    if (!transport) return;
+    try {
+      const report = await transport.getStats();
+      let rttMs: number | null = null;
+      let jitterMs: number | null = null;
+      let fps: number | null = null;
+      let bytes = 0;
+      let packetsLost = 0;
+      let packetsReceived = 0;
+      report.forEach((stat) => {
+        if (stat.type === "candidate-pair" && stat.state === "succeeded" && typeof stat.currentRoundTripTime === "number") rttMs = Math.round(stat.currentRoundTripTime * 1000);
+        if ((stat.type === "inbound-rtp" || stat.type === "outbound-rtp") && stat.kind === "video") {
+          bytes = Math.max(bytes, Number(stat.bytesReceived ?? stat.bytesSent ?? 0));
+          if (typeof stat.jitter === "number") jitterMs = Math.round(stat.jitter * 1000);
+          if (typeof stat.framesPerSecond === "number") fps = Math.round(stat.framesPerSecond);
+          packetsLost = Math.max(packetsLost, Number(stat.packetsLost ?? 0));
+          packetsReceived = Math.max(packetsReceived, Number(stat.packetsReceived ?? stat.packetsSent ?? 0));
+        }
+      });
+      const now = performance.now();
+      const previous = statsSampleRef.current;
+      const bitrateKbps = previous && now > previous.timestamp && bytes >= previous.bytes
+        ? Math.round(((bytes - previous.bytes) * 8) / (now - previous.timestamp))
+        : null;
+      statsSampleRef.current = { bytes, timestamp: now };
+      setWebRTCMetrics({
+        rttMs,
+        estimatedDelayMs: rttMs === null ? null : Math.round(rttMs / 2),
+        jitterMs,
+        bitrateKbps,
+        packetLossPct: packetsReceived + packetsLost > 0 ? Number(((packetsLost / (packetsReceived + packetsLost)) * 100).toFixed(2)) : null,
+        fps,
+      });
+    } catch {
+      // Statistics are best-effort and must never interrupt the broadcast path.
+    }
+  }
+
+  function changeOutputTarget(nextTarget: OutputTarget) {
+    if (nextTarget === "custom" && outputTarget !== "custom") {
+      setAntMediaURL("");
+      setAntMediaStreamKey("");
+      setAntMediaPublishToken("");
+      setAntMediaPlayToken("");
+      setAntMediaState("รอกรอก Custom WebRTC target");
+    }
+    setOutputTarget(nextTarget);
+  }
+
   // Before going live, Program Output is a local confidence preview of the
   // selected source. While live, the same element shows D1's return feed.
   useEffect(() => {
@@ -167,13 +264,13 @@ export default function StudioPage() {
     programMonitorVideoTrack.current?.detach(element);
 
     if (status === "live") {
-      programMonitorVideoTrack.current?.attach(element);
+      if (outputTarget === "livekit") programMonitorVideoTrack.current?.attach(element);
       return;
     }
     if (status === "ready" && activeCameraId) {
       cameras.find((camera) => camera.id === activeCameraId)?.videoTrack?.attach(element);
     }
-  }, [activeCameraId, cameras, status]);
+  }, [activeCameraId, cameras, outputTarget, status]);
 
   useEffect(() => {
     const element = previewVideo.current;
@@ -223,6 +320,7 @@ export default function StudioPage() {
       gain.disconnect();
     });
     void audioContextRef.current?.close();
+    stopAntMediaOutput(false);
   }, []);
 
   const buildCameraSources = (room: Room) => {
@@ -284,7 +382,9 @@ export default function StudioPage() {
              next[source.id] = current[source.id] ?? { enabled: false, volume: 100 };
            });
            audioMixSettingsRef.current = next;
-           if (programAudioTrack.current) void syncAudioMixer(audio, next, true);
+           if (statusRef.current === "live") {
+             void syncAudioMixer(audio, next, outputTargetRef.current === "livekit");
+           }
            return next;
          });
          
@@ -307,6 +407,13 @@ export default function StudioPage() {
       await pubRoom.connect(broadcaster.url, broadcaster.token, { autoSubscribe: true });
       updateCameras();
       publisherRoom.current = pubRoom;
+
+      if (outputTargetRef.current !== "livekit") {
+        setViewerCount(0);
+        setStatus("ready");
+        setMessage("Studio พร้อมแล้ว · ปลายทาง Ant Media รอเริ่ม Program");
+        return;
+      }
 
       await ensureProgramBridge(roomName);
 
@@ -372,10 +479,16 @@ export default function StudioPage() {
     const camera = sources.find((source) => source.id === id);
     if (!camera?.videoTrack) throw new Error(`กล้อง ${id} ยังไม่มี Video Track`);
     camera.videoPublication?.setVideoQuality(VideoQuality.HIGH);
-    await sendBridgeControl("program-switch", id);
+    if (outputTargetRef.current !== "livekit") {
+      await switchAntMediaVideo(id, sources);
+    } else {
+      await sendBridgeControl("program-switch", id);
+    }
     setActiveCameraId(id);
     setInputVideoQuality(sources, id, previewCameraId);
-    setMessage(`เปลี่ยน Program เป็น ${id} แล้ว · RTP passthrough`);
+    setMessage(outputTargetRef.current !== "livekit"
+      ? `เปลี่ยน Program เป็น ${id} แล้ว · ส่งไป Ant Media`
+      : `เปลี่ยน Program เป็น ${id} แล้ว · RTP passthrough`);
   }
 
   function selectCameraSource(id: string | null) {
@@ -445,7 +558,7 @@ export default function StudioPage() {
     const nextProgramScene = { ...scene, sourceId: previewCameraId, layers: scene.layers.map((layer) => ({ ...layer })) };
     setProgramScene(nextProgramScene);
     setProgramSceneKey(selectedSceneKey);
-    await publishProgramSceneSnapshot(nextProgramScene);
+    if (outputTargetRef.current === "livekit") await publishProgramSceneSnapshot(nextProgramScene);
     setPreviewSceneDirty(false);
   }
 
@@ -480,7 +593,8 @@ export default function StudioPage() {
   }
 
   async function startBroadcast() {
-    if (!activeCameraId || !outputPublisherRoom.current || !publisherRoom.current) {
+    const targetReady = isExternalOutput || Boolean(outputPublisherRoom.current);
+    if (!activeCameraId || !targetReady || !publisherRoom.current) {
       setMessage("กรุณารอหรือเลือกกล้องก่อนเริ่มถ่ายทอดสด");
       return;
     }
@@ -490,17 +604,24 @@ export default function StudioPage() {
       if (programAudioEnabledRef.current && audioSourcesRef.current.some((source) => audioMixSettingsRef.current[source.id]?.enabled)) {
         prepareAudioMixerContext();
       }
-      await syncAudioMixer(audioSourcesRef.current, audioMixSettingsRef.current, true);
+      await syncAudioMixer(audioSourcesRef.current, audioMixSettingsRef.current, outputTarget === "livekit");
       const nextProgramScene = { ...scene, sourceId: activeCameraId, layers: scene.layers.map((layer) => ({ ...layer })) };
       setProgramScene(nextProgramScene);
       setProgramSceneKey(selectedSceneKey);
       setPreviewSceneDirty(false);
-      await sendBridgeControl("program-start", activeCameraId);
-      await publishProgramSceneSnapshot(nextProgramScene);
+      if (isExternalOutput) {
+        await startAntMediaOutput(activeCameraId);
+      } else {
+        await sendBridgeControl("program-start", activeCameraId);
+        await publishProgramSceneSnapshot(nextProgramScene);
+      }
       statusRef.current = "live";
       setStatus("live");
-      setMessage(`กำลังถ่ายทอดสดจาก ${activeCameraId} · H.264 RTP passthrough`);
+      setMessage(isExternalOutput
+        ? `กำลังถ่ายทอดสดจาก ${activeCameraId} → ${outputTarget === "custom" ? "Custom WebRTC" : "Ant Media"} · ${antMediaStreamKey}`
+        : `กำลังถ่ายทอดสดจาก ${activeCameraId} · H.264 RTP passthrough`);
     } catch (error) {
+      if (isExternalOutput) stopAntMediaOutput(false);
       setMessage(error instanceof Error ? error.message : "เริ่มถ่ายทอดสดไม่สำเร็จ");
     } finally {
       setBroadcastBusy(false);
@@ -512,7 +633,11 @@ export default function StudioPage() {
     if (!room) return;
     setBroadcastBusy(true);
     try {
-      await sendBridgeControl("program-stop");
+      if (outputTargetRef.current !== "livekit") {
+        stopAntMediaOutput();
+      } else {
+        await sendBridgeControl("program-stop");
+      }
       if (programAudioTrack.current) {
         await room.localParticipant.unpublishTrack(programAudioTrack.current);
         programAudioTrack.current.stop();
@@ -538,9 +663,10 @@ export default function StudioPage() {
     }
     if (!enabled) {
       await programAudioTrack.current?.mute();
+      if (outputTargetRef.current !== "livekit") await syncAudioMixer(audioSourcesRef.current, audioMixSettingsRef.current, false);
       setMessage("ปิด Program Audio แล้ว");
     } else {
-      await syncAudioMixer(audioSourcesRef.current, audioMixSettingsRef.current, true);
+      await syncAudioMixer(audioSourcesRef.current, audioMixSettingsRef.current, outputTargetRef.current === "livekit");
       setMessage("เปิด Program Audio แล้ว");
     }
   }
@@ -553,7 +679,9 @@ export default function StudioPage() {
     };
     audioMixSettingsRef.current = next;
     setAudioMixSettings(next);
-    if (programAudioTrack.current) void syncAudioMixer(audioSourcesRef.current, next, true);
+    if (statusRef.current === "live") {
+      void syncAudioMixer(audioSourcesRef.current, next, outputTargetRef.current === "livekit");
+    }
   }
 
   async function syncAudioMixer(sources: AudioSource[], settings: Record<string, AudioMixSetting>, shouldPublish: boolean) {
@@ -610,6 +738,115 @@ export default function StudioPage() {
     }
   }
 
+  async function startAntMediaOutput(cameraID: string) {
+    const targetURL = antMediaURL.trim();
+    const targetStreamKey = antMediaStreamKey.trim();
+    if (!targetURL.startsWith("wss://") && !targetURL.startsWith("ws://")) {
+      throw new Error("Ant Media WebSocket URL ต้องขึ้นต้นด้วย wss:// หรือ ws://");
+    }
+    if (!targetStreamKey) throw new Error("กรุณากรอก Ant Media Stream Key");
+
+    const videoTrack = cameras.find((camera) => camera.id === cameraID)?.videoTrack?.mediaStreamTrack;
+    const audioTrack = audioDestinationRef.current?.stream.getAudioTracks()[0];
+    if (!videoTrack) throw new Error(`ไม่พบ Video Track ของ ${cameraID}`);
+    if (!audioTrack) throw new Error("Program Audio mixer ยังไม่พร้อม");
+
+    stopAntMediaOutput(false);
+    setAntMediaState("กำลังเชื่อมต่อ WebSocket…");
+    const { WebRTCAdaptor } = await import("@antmedia/webrtc_adaptor");
+    const programStream = new MediaStream([videoTrack, audioTrack]);
+    antMediaStreamKeyRef.current = targetStreamKey;
+
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const adaptor = new WebRTCAdaptor({
+        websocket_url: targetURL,
+        localStream: programStream,
+        mediaConstraints: { video: false, audio: false },
+        peerconnection_config: { iceServers: [{ urls: "stun:stun1.l.google.com:19302" }] },
+        sdp_constraints: { OfferToReceiveAudio: false, OfferToReceiveVideo: false },
+        callback: (info: string) => {
+          console.info(`[STUDIO ANT PUBLISH] ${info}`);
+          if (info === "initialized") {
+            setAntMediaState("WebSocket พร้อม · กำลัง publish…");
+            adaptor.publish(targetStreamKey, antMediaPublishToken.trim() || undefined);
+          } else if (info === "publish_started") {
+            setAntMediaState("PUBLISHING · กำลังเปิด Return Monitor…");
+            if (!settled) {
+              settled = true;
+              resolve();
+            }
+            startAntMediaReturn(WebRTCAdaptor, targetURL, targetStreamKey);
+          } else if (info === "publish_finished") {
+            setAntMediaState("หยุด Publish แล้ว");
+          }
+        },
+        callbackError: (error: string, detail?: unknown) => {
+          const message = `${error}${formatAntMediaDetail(detail) ? ` · ${formatAntMediaDetail(detail)}` : ""}`;
+          console.error(`[STUDIO ANT PUBLISH] ${message}`);
+          setAntMediaState(`ERROR · ${message}`);
+          if (!settled) {
+            settled = true;
+            reject(new Error(message));
+          }
+        },
+      });
+      antMediaPublisherRef.current = adaptor;
+    });
+  }
+
+  function startAntMediaReturn(Adaptor: typeof WebRTCAdaptor, targetURL: string, targetStreamKey: string) {
+    const player = new Adaptor({
+      websocket_url: targetURL,
+      remoteVideoElement: outputVideo.current,
+      isPlayMode: true,
+      mediaConstraints: { video: false, audio: false },
+      peerconnection_config: { iceServers: [{ urls: "stun:stun1.l.google.com:19302" }] },
+      callback: (info: string) => {
+        console.info(`[STUDIO ANT RETURN] ${info}`);
+        if (info === "initialized") {
+          player.play(targetStreamKey, antMediaPlayToken.trim() || undefined);
+        } else if (info === "play_started") {
+          setAntMediaState("PUBLISHING · D1 RETURN RECEIVED");
+        } else if (info === "play_finished") {
+          setAntMediaState("PUBLISHING · Return หยุดแล้ว");
+        }
+      },
+      callbackError: (error: string, detail?: unknown) => {
+        const message = `${error}${formatAntMediaDetail(detail) ? ` · ${formatAntMediaDetail(detail)}` : ""}`;
+        console.error(`[STUDIO ANT RETURN] ${message}`);
+        setAntMediaState(`PUBLISHING · RETURN ERROR · ${message}`);
+      },
+    });
+    antMediaPlayerRef.current = player;
+  }
+
+  async function switchAntMediaVideo(cameraID: string, sources: CameraSource[] = cameras) {
+    const videoTrack = sources.find((camera) => camera.id === cameraID)?.videoTrack?.mediaStreamTrack;
+    const sender = antMediaPublisherRef.current?.getSender(antMediaStreamKeyRef.current, "video") as RTCRtpSender | undefined;
+    if (!videoTrack || !sender) throw new Error("Ant Media video sender ยังไม่พร้อม");
+    await sender.replaceTrack(videoTrack);
+    console.info(`[STUDIO ANT PUBLISH] video_track_replaced · ${cameraID}`);
+  }
+
+  function stopAntMediaOutput(updateState = true) {
+    const streamKey = antMediaStreamKeyRef.current;
+    const player = antMediaPlayerRef.current;
+    const publisher = antMediaPublisherRef.current;
+    antMediaPlayerRef.current = null;
+    antMediaPublisherRef.current = null;
+    antMediaStreamKeyRef.current = "";
+    if (player) {
+      if (streamKey) player.stop(streamKey);
+      player.closeWebSocket();
+    }
+    if (publisher) {
+      if (streamKey) publisher.stop(streamKey);
+      publisher.closeWebSocket();
+    }
+    if (updateState) setAntMediaState("ไม่ได้เชื่อมต่อ");
+  }
+
   async function destroyAudioMixer() {
     audioMixerNodesRef.current.forEach(({ source, gain }) => {
       source.disconnect();
@@ -622,6 +859,7 @@ export default function StudioPage() {
   }
 
   async function disconnectAll() {
+    stopAntMediaOutput();
     outputPublisherRoom.current?.disconnect();
     publisherRoom.current?.disconnect();
     programAudioTrack.current?.stop();
@@ -869,6 +1107,62 @@ export default function StudioPage() {
       </section>
 
       <div style={{ display: "flex", flexDirection: "column", gap: "32px", alignItems: "stretch" }}>
+        <Card className="studio-output-config">
+          <CardHeader>
+            <div>
+              <strong>Program Destination</strong>
+              <span>เลือกปลายทางก่อนเริ่มถ่ายทอดสด</span>
+            </div>
+            <Badge variant={isExternalOutput ? "live" : "default"} showDot>
+              {outputTarget === "custom" ? "CUSTOM WEBRTC" : outputTarget === "antmedia" ? "ANT MEDIA D1" : "LIVEKIT D1"}
+            </Badge>
+          </CardHeader>
+          <CardBody>
+            <label>
+              <span>OUTPUT TARGET</span>
+              <select value={outputTarget} onChange={(event) => changeOutputTarget(event.target.value as OutputTarget)} disabled={isConnected || isBusy}>
+                <option value="livekit">LiveKit D1 เดิม</option>
+                <option value="antmedia">D1 จริง / Ant Media</option>
+                <option value="custom">Custom WebRTC Target</option>
+              </select>
+            </label>
+            {isExternalOutput && (
+              <>
+                <label className="wide">
+                  <span>{outputTarget === "custom" ? "CUSTOM WEBRTC WEBSOCKET URL" : "WEBRTC WEBSOCKET URL"}</span>
+                  <input value={antMediaURL} onChange={(event) => setAntMediaURL(event.target.value)} disabled={isLive} placeholder="wss://your-server.example/WebRTCAppEE/websocket" spellCheck={false} />
+                </label>
+                <label>
+                  <span>STREAM KEY</span>
+                  <input value={antMediaStreamKey} onChange={(event) => setAntMediaStreamKey(event.target.value)} disabled={isLive} placeholder="your-stream-key" spellCheck={false} />
+                </label>
+                <label>
+                  <span>PUBLISH TOKEN <small>ไม่บังคับ</small></span>
+                  <input type="password" value={antMediaPublishToken} onChange={(event) => setAntMediaPublishToken(event.target.value)} disabled={isLive} autoComplete="off" />
+                </label>
+                <label>
+                  <span>PLAY TOKEN <small>ไม่บังคับ</small></span>
+                  <input type="password" value={antMediaPlayToken} onChange={(event) => setAntMediaPlayToken(event.target.value)} disabled={isLive} autoComplete="off" />
+                </label>
+                <div className="studio-output-status"><RadioTower size={15} /><span>{antMediaState}</span></div>
+                {outputTarget === "custom" && <p className="studio-output-hint">รองรับ WebRTC signalling ที่เข้ากันได้กับ Ant Media WebRTC adaptor; URL ต้องขึ้นต้นด้วย <code>wss://</code> หรือ <code>ws://</code></p>}
+              </>
+            )}
+          </CardBody>
+        </Card>
+
+        <section className="studio-telemetry" aria-label="WebRTC telemetry">
+          <div className="studio-telemetry-heading"><span>REAL-TIME TRANSPORT</span><small>อัปเดตทุก 2 วินาที · ค่า Delay เป็นค่าประมาณจาก RTT</small></div>
+          <div className="studio-telemetry-grid">
+            <div><span>EST. DELAY</span><strong>{webRTCMetrics.estimatedDelayMs === null ? "—" : `${webRTCMetrics.estimatedDelayMs} ms`}</strong><small>RTT / 2</small></div>
+            <div><span>WEBRTC RTT</span><strong>{webRTCMetrics.rttMs === null ? "—" : `${webRTCMetrics.rttMs} ms`}</strong><small>network round trip</small></div>
+            <div><span>JITTER</span><strong>{webRTCMetrics.jitterMs === null ? "—" : `${webRTCMetrics.jitterMs} ms`}</strong><small>video transport</small></div>
+            <div><span>BITRATE</span><strong>{webRTCMetrics.bitrateKbps === null ? "—" : `${webRTCMetrics.bitrateKbps} kbps`}</strong><small>video throughput</small></div>
+            <div><span>PACKET LOSS</span><strong>{webRTCMetrics.packetLossPct === null ? "—" : `${webRTCMetrics.packetLossPct}%`}</strong><small>RTP packets</small></div>
+            <div><span>VIDEO FPS</span><strong>{webRTCMetrics.fps === null ? "—" : webRTCMetrics.fps}</strong><small>current frame rate</small></div>
+          </div>
+        </section>
+
         {/* Top Section - Monitors */}
         <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
           
@@ -946,7 +1240,7 @@ export default function StudioPage() {
                   )}
                   {isLive && (
                     <Badge variant="default" style={{ position: "absolute", top: "16px", right: "16px", background: "rgba(0,0,0,0.6)", backdropFilter: "blur(4px)", fontSize: "10px", letterSpacing: "0.05em", color: "var(--text-secondary)" }}>
-                      D1 RETURN
+                      {isExternalOutput ? outputTarget === "custom" ? "CUSTOM RETURN" : "ANT MEDIA RETURN" : "D1 RETURN"}
                     </Badge>
                   )}
                   {!isLive && activeCameraId && (
@@ -1058,7 +1352,9 @@ export default function StudioPage() {
             <div style={{ display: "flex", flexDirection: "column", gap: "2px" }}>
               <span style={{ fontSize: "11px", letterSpacing: "0.1em", fontWeight: 600, color: "var(--text-secondary)" }}>PRE-BROADCAST CHECK</span>
               <strong style={{ fontSize: "13px", margin: "2px 0" }}>{activeCameraId ? `กล้องเริ่มต้น: ${activeCameraId.split('-').pop()}` : "รอกล้องเชื่อมต่อ"}</strong>
-              <span style={{ fontSize: "11px", color: "var(--text-tertiary)" }}>Session: {programRoomID(roomName)}</span>
+              <span style={{ fontSize: "11px", color: "var(--text-tertiary)" }}>
+                {isExternalOutput ? `${outputTarget === "custom" ? "Custom WebRTC" : "Ant Media"}: ${antMediaStreamKey || "ยังไม่ได้กำหนด Stream Key"}` : `Session: ${programRoomID(roomName)}`}
+              </span>
             </div>
             <Button 
               variant={programAudioEnabled ? "primary" : "secondary"} 
@@ -1084,7 +1380,7 @@ export default function StudioPage() {
           )}
           {status === "ready" && (
             <Button variant="primary" disabled={broadcastBusy || !activeCameraId} onClick={startBroadcast} isLoading={broadcastBusy} style={{ background: "var(--danger)", color: "white" }}>
-              <RadioTower size={16} /> เริ่มถ่ายทอดสด
+              <RadioTower size={16} /> {isExternalOutput ? `เริ่มส่งไป ${outputTarget === "custom" ? "Custom Target" : "D1 จริง"}` : "เริ่มถ่ายทอดสด"}
             </Button>
           )}
           {isLive && (
@@ -1095,9 +1391,11 @@ export default function StudioPage() {
           {isConnected && (
             <Button variant="ghost" onClick={leaveStudio}>ออกจาก Studio</Button>
           )}
-          <Link href={`/watch?channel=${roomName}`} target="_blank">
-            <Button variant="secondary">เปิดหน้าผู้ชม ↗</Button>
-          </Link>
+          {outputTarget === "livekit" && (
+            <Link href={`/watch?channel=${roomName}`} target="_blank">
+              <Button variant="secondary">เปิดหน้าผู้ชม ↗</Button>
+            </Link>
+          )}
           <Link href="/channels">
             <Button variant="ghost">Channel ทั้งหมด</Button>
           </Link>
@@ -1105,6 +1403,21 @@ export default function StudioPage() {
       </footer>
     </main>
   );
+}
+
+function formatAntMediaDetail(detail: unknown) {
+  if (detail == null) return "";
+  if (typeof detail === "string") return detail;
+  if (detail && typeof detail === "object") {
+    const value = detail as { message?: unknown; definition?: unknown };
+    if (typeof value.message === "string") return value.message;
+    if (typeof value.definition === "string") return value.definition;
+  }
+  try {
+    return JSON.stringify(detail).slice(0, 400);
+  } catch {
+    return String(detail);
+  }
 }
 
 function CameraPreviewCard({ camera }: { camera: CameraSource }) {

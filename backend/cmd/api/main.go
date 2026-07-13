@@ -87,6 +87,7 @@ func main() {
 	mux.HandleFunc("GET /api/assets/{id}", assets.handleGet)
 	mux.HandleFunc("GET /api/rooms", rooms.handleGet)
 	mux.HandleFunc("POST /api/rooms", rooms.handleCreate)
+	mux.HandleFunc("GET /api/sfu/stats", sfuStatsHandler(cfg))
 
 	handler := withCORS(cfg.AllowedOrigins, cfg.AllowPrivate, withLogging(logger, mux))
 	server := &http.Server{

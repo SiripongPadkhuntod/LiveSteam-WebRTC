@@ -70,6 +70,16 @@ Stop the stack:
 make infra-down
 ```
 
+### Test the real D1 (Ant Media) without replacing the existing D1
+
+Open `https://<LAN_IP>:3443/d1-test` (or `http://localhost:3001/d1-test`) and start the connection test. This isolated page publishes the browser camera and microphone directly to Ant Media, defaulting to `wss://rtc2.streamssl.com:5443/WebRTCAppEE/websocket` and stream ID `sell-image`.
+
+The existing LiveKit D1, Studio, Viewer, and RTP bridge paths are unchanged. If publish security is enabled, enter its publish token on the test page. Docker defaults can be overridden with `ANT_MEDIA_WEBSOCKET_URL` and `ANT_MEDIA_STREAM_ID` before starting Compose.
+
+The test page shows two monitors. **LOCAL / outbound** is the camera before publishing, while **D1 RETURN / inbound** is fed by a separate Ant Media player connection. Seeing `D1 ACCEPTED`, `RETURN RECEIVED`, and matching motion in the Return monitor verifies both directions. Secured deployments may require separate publish and play tokens.
+
+The on-page Connection Console records Publish, Return, and Audio events and mirrors them to the browser developer console with a `[D1 ...]` prefix. Once publishing is active, enable Return audio and use **Send Test Sound to D1** to inject a 650 ms, 880 Hz tone into the actual outgoing audio track. Headphones are recommended to avoid an acoustic feedback loop.
+
 ## Broadcast workflow
 
 1. Create a room at `/channels`. The in-memory Control API returns a six-character code and a room ID such as `room-ab12cd`.
@@ -77,6 +87,8 @@ make infra-down
 3. Enter the generated Studio link. Studio joins the source room, ensures the bridge exists, then joins `<room>-program` on D1 as a monitor.
 4. Add/select a camera in a Scene, choose audio inputs and gain, then press Start Broadcast.
 5. Share `/watch?channel=<room-id>`. Do not use the six-character code as the `channel` value.
+
+Before entering Studio, `Program Destination` can be set to either the existing LiveKit D1 path or a real/custom Ant Media destination. Ant Media mode still receives all cameras and microphones from the Source LiveKit room, publishes the selected Program camera plus Studio audio mix to the configured WebSocket URL and stream key, replaces the outgoing video track on Cut without reconnecting, and plays the Ant Media return feed in the Program monitor. It does not connect the local LiveKit D1 or start the RTP bridge. Scene image overlays are not currently burned into the Ant Media video.
 
 Camera sources publish one stable, non-simulcast H.264 1080p/30 track (`camera-video`, up to 6 Mbps) and optional `camera-audio`. Screen, video-file, and image-file sources use the same publication boundary. Microphone-only pages publish `microphone-audio`.
 

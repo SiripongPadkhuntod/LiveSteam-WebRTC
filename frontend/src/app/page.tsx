@@ -2,7 +2,7 @@ import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Card, CardBody } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Video, Mic, LayoutDashboard, MonitorPlay, Zap, ArrowRight, Layers } from "lucide-react";
+import { Video, Mic, LayoutDashboard, MonitorPlay, Zap, ArrowRight, Layers, Radio } from "lucide-react";
 
 export default function Home() {
   return (
@@ -43,6 +43,12 @@ export default function Home() {
             <Button size="lg" variant="secondary" style={{ height: "56px", padding: "0 24px" }}>
               <Mic size={20} />
               เชื่อมต่อไมค์
+            </Button>
+          </Link>
+          <Link href="/d1-test">
+            <Button size="lg" variant="secondary" style={{ height: "56px", padding: "0 24px" }}>
+              <Radio size={20} />
+              ทดสอบ D1 จริง
             </Button>
           </Link>
         </div>
